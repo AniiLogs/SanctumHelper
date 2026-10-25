@@ -1,0 +1,10 @@
+bin/
+obj/
+build/
+dist/
+screenshots/
+.claude/
+.vs/
+*.user
+__pycache__/
+installer/Setup/payload.zip

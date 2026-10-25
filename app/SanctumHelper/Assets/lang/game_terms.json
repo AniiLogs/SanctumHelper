@@ -1,0 +1,440 @@
+{
+ "languages": [
+  "zh_CN",
+  "zh_TW",
+  "en",
+  "ko_KR",
+  "ja_JP",
+  "vi_VN",
+  "ru_RU",
+  "de_DE",
+  "fr_FR",
+  "es_ES",
+  "pt_PT",
+  "id_ID",
+  "th_TH"
+ ],
+ "terms": {
+  "zh_CN": {
+   "Normal": [
+    "普通",
+    "一般",
+    "Normal",
+    "正常",
+    "难度：新手"
+   ],
+   "Hard": [
+    "困难",
+    "难度：困难"
+   ],
+   "Nightmare": [
+    "噩梦",
+    "难度：噩梦"
+   ],
+   "Chaos": [
+    "混沌",
+    "「混沌」"
+   ],
+   "EggHeistTeamMode": [
+    "小队摸蛋",
+    "小队摸蛋小"
+   ],
+   "EggHeist": [
+    "抢蛋"
+   ],
+   "EggBoat": [
+    "蛋船"
+   ],
+   "EggNest": [
+    "蛋巢",
+    "伊莫蛋巢"
+   ],
+   "Challenge": [
+    "限时挑战"
+   ]
+  },
+  "zh_TW": {
+   "Normal": [
+    "普通",
+    "一般",
+    "Normal",
+    "正常",
+    "難度：普通"
+   ],
+   "Hard": [
+    "困難",
+    "難度：困難"
+   ],
+   "Nightmare": [
+    "惡夢",
+    "難度：惡夢"
+   ],
+   "Chaos": [
+    "混沌",
+    "「混沌」"
+   ],
+   "EggHeistTeamMode": [
+    "小隊摸蛋",
+    "小隊摸蛋小"
+   ],
+   "EggHeist": [
+    "搶蛋"
+   ],
+   "EggBoat": [
+    "蛋船"
+   ],
+   "EggNest": [
+    "蛋巢",
+    "伊莫蛋巢"
+   ],
+   "Challenge": [
+    "限時挑戰"
+   ]
+  },
+  "en": {
+   "Normal": [
+    "Normal"
+   ],
+   "Hard": [
+    "Hard"
+   ],
+   "Nightmare": [
+    "Nightmare"
+   ],
+   "Chaos": [
+    "Chaos"
+   ],
+   "EggHeistTeamMode": [
+    "Operation: Egg Heist Team Mode"
+   ],
+   "EggHeist": [
+    "Egg Heist"
+   ],
+   "EggBoat": [
+    "Egg Boat"
+   ],
+   "EggNest": [
+    "Egg Nest"
+   ],
+   "Challenge": [
+    "Limited-Time Challenge"
+   ]
+  },
+  "ko_KR": {
+   "Normal": [
+    "일반",
+    "Normal",
+    "정상",
+    "보통",
+    "난이도:  초보",
+    "평범"
+   ],
+   "Hard": [
+    "어려움",
+    "난이도: 어려움"
+   ],
+   "Nightmare": [
+    "악몽",
+    "난이도: 악몽"
+   ],
+   "Chaos": [
+    "카오스",
+    "「카오스」"
+   ],
+   "EggHeistTeamMode": [
+    "애니모 알 쟁탈전 팀 모드"
+   ],
+   "EggHeist": [
+    "알 쟁탈"
+   ],
+   "EggBoat": [
+    "알 선박"
+   ],
+   "EggNest": [
+    "알 둥지",
+    "애니모 알 둥지"
+   ],
+   "Challenge": [
+    "한정 시간 도전"
+   ]
+  },
+  "ja_JP": {
+   "Normal": [
+    "ノーマル",
+    "アベレージ",
+    "Normal",
+    "正常",
+    "ビギナー"
+   ],
+   "Hard": [
+    "ハード"
+   ],
+   "Nightmare": [
+    "ナイトメア"
+   ],
+   "Chaos": [
+    "カオス",
+    "「カオス」"
+   ],
+   "EggHeistTeamMode": [
+    "チームでタマゴ探し",
+    "チームでタマゴ探し・ミニ"
+   ],
+   "EggHeist": [
+    "タマゴ争奪",
+    "タマゴ争奪大作戦"
+   ],
+   "EggBoat": [
+    "タマゴボート"
+   ],
+   "EggNest": [
+    "タマゴの巣",
+    "アニモのタマゴの巣"
+   ],
+   "Challenge": [
+    "時限チャレンジ"
+   ]
+  },
+  "vi_VN": {
+   "Normal": [
+    "Thường"
+   ],
+   "Hard": [
+    "Khó"
+   ],
+   "Nightmare": [
+    "Ác Mộng"
+   ],
+   "Chaos": [
+    "Hỗn Mang"
+   ],
+   "EggHeistTeamMode": [
+    "Chiến Dịch Trộm Trứng Chế Độ Đội Nhóm"
+   ],
+   "EggHeist": [
+    "Trộm Trứng"
+   ],
+   "EggBoat": [
+    "Thuyền Trứng"
+   ],
+   "EggNest": [
+    "Ổ Trứng"
+   ],
+   "Challenge": [
+    "Thử Thách Có Thời Hạn"
+   ]
+  },
+  "ru_RU": {
+   "Normal": [
+    "Обычн."
+   ],
+   "Hard": [
+    "Сложно"
+   ],
+   "Nightmare": [
+    "Кошмар"
+   ],
+   "Chaos": [
+    "Хаос"
+   ],
+   "EggHeistTeamMode": [
+    "«Кража яиц»: командный режим",
+    "Командный режим операции «Кража яиц»"
+   ],
+   "EggHeist": [
+    "Кража яиц"
+   ],
+   "EggBoat": [
+    "Челнок"
+   ],
+   "EggNest": [
+    "Гнездо"
+   ],
+   "Challenge": [
+    "Временное испытание"
+   ]
+  },
+  "de_DE": {
+   "Normal": [
+    "Normal"
+   ],
+   "Hard": [
+    "Schwer"
+   ],
+   "Nightmare": [
+    "Albtraum"
+   ],
+   "Chaos": [
+    "Chaos"
+   ],
+   "EggHeistTeamMode": [
+    "Operation: Eierraub – Teammodus",
+    "Operation: Eierraub – Teammodus"
+   ],
+   "EggHeist": [
+    "Eierraub"
+   ],
+   "EggBoat": [
+    "Eierboot"
+   ],
+   "EggNest": [
+    "Eiernest"
+   ],
+   "Challenge": [
+    "Zeitlich limitierte Herausforderung"
+   ]
+  },
+  "fr_FR": {
+   "Normal": [
+    "Normal",
+    "Commun"
+   ],
+   "Hard": [
+    "Difficile"
+   ],
+   "Nightmare": [
+    "Cauchemar"
+   ],
+   "Chaos": [
+    "Chaos"
+   ],
+   "EggHeistTeamMode": [
+    "Chasse aux œufs - Mode équipe",
+    "Opération : Chasse aux œufs en équipe"
+   ],
+   "EggHeist": [
+    "Chasse aux œufs"
+   ],
+   "EggBoat": [
+    "Bateau à œufs"
+   ],
+   "EggNest": [
+    "Nid d'œufs"
+   ],
+   "Challenge": [
+    "Défi à durée limitée"
+   ]
+  },
+  "es_ES": {
+   "Normal": [
+    "Normal"
+   ],
+   "Hard": [
+    "Difícil"
+   ],
+   "Nightmare": [
+    "Pesadilla"
+   ],
+   "Chaos": [
+    "Caos"
+   ],
+   "EggHeistTeamMode": [
+    "Operación: Robo de huevo por equipos",
+    "Operación: Robo de huevos por equipos",
+    "Robo de huevos: Modo de equipo"
+   ],
+   "EggHeist": [
+    "Robo de huevos"
+   ],
+   "EggBoat": [
+    "Bote de huevo"
+   ],
+   "EggNest": [
+    "Nido de huevo"
+   ],
+   "Challenge": [
+    "Desafío por tiempo limitado"
+   ]
+  },
+  "pt_PT": {
+   "Normal": [
+    "Normal"
+   ],
+   "Hard": [
+    "Difícil"
+   ],
+   "Nightmare": [
+    "Pesadelo"
+   ],
+   "Chaos": [
+    "Caos"
+   ],
+   "EggHeistTeamMode": [
+    "Operação: Roubo dos Ovos Modo Equipe",
+    "Roubo dos Ovos - Modo Equipe"
+   ],
+   "EggHeist": [
+    "Roubo dos Ovos"
+   ],
+   "EggBoat": [
+    "Barco de Ovos"
+   ],
+   "EggNest": [
+    "Ninho de Ovos"
+   ],
+   "Challenge": [
+    "Desafio por tempo limitado"
+   ]
+  },
+  "id_ID": {
+   "Normal": [
+    "Normal",
+    "Biasa"
+   ],
+   "Hard": [
+    "Sulit"
+   ],
+   "Nightmare": [
+    "Mimpi Buruk"
+   ],
+   "Chaos": [
+    "Kekacauan"
+   ],
+   "EggHeistTeamMode": [
+    "Operasi: Curi Telur Mode Tim"
+   ],
+   "EggHeist": [
+    "Curi Telur"
+   ],
+   "EggBoat": [
+    "Kapal Telur"
+   ],
+   "EggNest": [
+    "Sarang Telur"
+   ],
+   "Challenge": [
+    "Tantangan Terbatas Waktu"
+   ]
+  },
+  "th_TH": {
+   "Normal": [
+    "ธรรมดา",
+    "ปกติ"
+   ],
+   "Hard": [
+    "ยาก"
+   ],
+   "Nightmare": [
+    "ฝันร้าย"
+   ],
+   "Chaos": [
+    "โกลาหล"
+   ],
+   "EggHeistTeamMode": [
+    "ปฏิบัติการ: ขโมยไข่ โหมดทีม"
+   ],
+   "EggHeist": [
+    "ขโมย​ไข่"
+   ],
+   "EggBoat": [
+    "เรือไข่"
+   ],
+   "EggNest": [
+    "รังวางไข่"
+   ],
+   "Challenge": [
+    "การ​ท้าทาย​จํากัด​เวลา"
+   ]
+  }
+ }
+}

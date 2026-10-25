@@ -1,0 +1,29 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- The installer targets .NET Framework 4.8, which ships with every Windows 10/11 PC,
+       so Setup.exe stays small and runs anywhere. The app itself is self-contained. -->
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net48</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <LangVersion>latest</LangVersion>
+    <Nullable>disable</Nullable>
+    <AssemblyName>SanctumHelper-Setup</AssemblyName>
+    <RootNamespace>SanctumSetup</RootNamespace>
+    <ApplicationIcon>..\..\app\SanctumHelper\Assets\app.ico</ApplicationIcon>
+    <ApplicationManifest>setup.manifest</ApplicationManifest>
+    <Version>1.0.0</Version>
+    <Product>Sanctum Helper Setup</Product>
+    <DebugType>none</DebugType>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" PrivateAssets="all" />
+    <Reference Include="System.IO.Compression" />
+    <Reference Include="Microsoft.CSharp" />
+    <Reference Include="System.IO.Compression.FileSystem" />
+    <EmbeddedResource Include="..\..\build\payload.zip" LogicalName="payload.zip" />
+  </ItemGroup>
+
+</Project>
+

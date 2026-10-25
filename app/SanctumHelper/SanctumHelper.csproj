@@ -1,0 +1,36 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net9.0-windows10.0.19041.0</TargetFramework>
+    <SupportedOSPlatformVersion>10.0.19041.0</SupportedOSPlatformVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>Assets\app.ico</ApplicationIcon>
+    <AssemblyName>SanctumHelper</AssemblyName>
+    <RootNamespace>SanctumHelper</RootNamespace>
+    <Version>1.0.0</Version>
+    <Product>Sanctum Helper</Product>
+    <Description>Egg Heist companion overlay for Aniimo</Description>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <SelfContained>true</SelfContained>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+    <DebugType Condition="'$(Configuration)' == 'Release'">none</DebugType>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="OpenCvSharp4.Windows" Version="4.10.0.20241108" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Content Include="Assets\layouts.json" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="Assets\maps\*.png" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="Assets\icons\*.png" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="Assets\lang\*.json" CopyToOutputDirectory="PreserveNewest" />
+    <Resource Include="Assets\app.ico" />
+  </ItemGroup>
+
+</Project>
