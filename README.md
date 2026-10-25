@@ -69,3 +69,8 @@ build.ps1                  # app + installer -> dist/SanctumHelper-Setup-<versio
 
 Developer checks: `SanctumHelper.exe --analyze <out> <screenshots...>` renders the overlay on
 saved screenshots; `--settings-shot <out> <lang>` renders the settings window.
+
+## License
+
+The code is under the [MIT License](LICENSE). The game's art, icons and text in `Assets` are
+not covered by it and belong to their owners.
