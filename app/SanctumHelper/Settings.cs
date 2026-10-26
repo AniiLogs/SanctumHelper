@@ -97,6 +97,8 @@ public sealed class Settings
     public static string Dir => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "SanctumHelper");
     static string FilePath => Path.Combine(Dir, "settings.json");
     static readonly JsonSerializerOptions Json = new() { WriteIndented = true };
+    /// <summary>The settings file as this process last read or wrote it (hosted mode ignores its own saves).</summary>
+    public static string? LastJson { get; private set; }
 
     public static Settings Load()
     {
@@ -105,6 +107,7 @@ public sealed class Settings
             if (File.Exists(FilePath))
             {
                 var json = File.ReadAllText(FilePath);
+                LastJson = json;
                 var loaded = JsonSerializer.Deserialize<Settings>(json) ?? new Settings();
                 if (!json.Contains("\"Version\"")) loaded.Version = 1;
                 // v1 defaulted to Caps Lock, which flips caps every press: move to Left Ctrl.
@@ -126,8 +129,11 @@ public sealed class Settings
     public void Save()
     {
         Directory.CreateDirectory(Dir);
-        File.WriteAllText(FilePath, JsonSerializer.Serialize(this, Json));
-        ApplyStartup();
+        var json = JsonSerializer.Serialize(this, Json);
+        LastJson = json;
+        File.WriteAllText(FilePath, json);
+        // Hosted by the aLogs app, which starts with Windows itself.
+        if (!Hosted.Active) ApplyStartup();
     }
 
     /// <summary>Layers added in later versions fall back to their default.</summary>

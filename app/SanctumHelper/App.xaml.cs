@@ -19,6 +19,7 @@ public partial class App : Application
     OverlayWindow? overlay;
     ToastWindow toast = null!;
     SettingsWindow? settingsWindow;
+    Hosted? hosted;
 
     protected override void OnStartup(StartupEventArgs e)
     {
@@ -71,7 +72,16 @@ public partial class App : Application
             Shutdown();
             return;
         }
+        bool hostedMode = e.Args.Contains("--hosted");
+        if (hostedMode) Hosted.Enable();
         single = new Mutex(true, @"Local\SanctumHelper.Single", out bool first);
+        if (!first && hostedMode)
+        {
+            // A standalone copy is running: tell aLogs instead of showing a message box.
+            Log.Write("hosted: another Sanctum Helper is already running");
+            Shutdown(3);
+            return;
+        }
         if (!first)
         {
             MessageBox.Show(Lang.T("Sanctum Helper is already running. Look for its icon in the system tray."), "Sanctum Helper");
@@ -107,6 +117,15 @@ public partial class App : Application
         engine.Notify += (text, diff) => Dispatcher.BeginInvoke(() =>
             toast.Show(text, diff != null ? OverlayView.DifficultyColor(diff) : System.Windows.Media.Color.FromRgb(0x5C, 0xB8, 0xFF), engine.GameClient));
         engine.Start();
+
+        if (hostedMode)
+        {
+            int pi = Array.IndexOf(e.Args, "--parent");
+            int parentPid = pi >= 0 && pi + 1 < e.Args.Length && int.TryParse(e.Args[pi + 1], out var pp) ? pp : 0;
+            hosted = new Hosted(this, settings, db, engine, hook, parentPid);
+            Log.Write("hosted by the aLogs app");
+            return;
+        }
 
         tray = new WinForms.NotifyIcon
         {
@@ -219,8 +238,12 @@ public partial class App : Application
         Shutdown();
     }
 
+    /// <summary>Hosted mode: the aLogs app closed or asked us to stop.</summary>
+    public void ExitHosted() => ExitApp();
+
     protected override void OnExit(ExitEventArgs e)
     {
+        hosted?.Dispose();
         engine?.Dispose();
         hook?.Dispose();
         tray?.Dispose();

@@ -55,6 +55,8 @@ public static class ScreenGrabber
     /// or null when the window gave no image (then fall back to the screen).</summary>
     public static Mat? GrabWindow(IntPtr hwnd, int clientW, int clientH, Rect sub)
     {
+        // The aLogs app's shared frame when it's running, so the window is copied once for all tools.
+        if (SharedCapture.TryGrab(hwnd, clientW, clientH, sub) is { } shared) return shared;
         IntPtr screen = Native.GetDC(IntPtr.Zero);
         IntPtr mem = Native.CreateCompatibleDC(screen);
         IntPtr bmp = Native.CreateCompatibleBitmap(screen, clientW, clientH);
