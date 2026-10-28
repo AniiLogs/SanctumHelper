@@ -96,7 +96,7 @@ public sealed class ToastWindow : Window
         Native.SetWindowDisplayAffinity(hwnd, settings.RecordableOverlay ? Native.WDA_NONE : Native.WDA_EXCLUDEFROMCAPTURE);
         // Size and place in physical pixels, at the game's top-right corner.
         var dpi = VisualTreeHelper.GetDpi(this);
-        double ui = lastClient.Height / 1080.0;
+        double ui = Regions.Ui(lastClient.Width, lastClient.Height);
         scale.ScaleX = scale.ScaleY = ui / dpi.DpiScaleX;
         int w = (int)Math.Ceiling((W + Margin + 8) * ui), h = (int)Math.Ceiling((H + Margin + 16) * ui);
         base.Show();

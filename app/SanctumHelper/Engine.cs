@@ -15,24 +15,60 @@ namespace SanctumHelper;
 /// less the faster it moves, so a resting cone stops jittering and a turning one doesn't trail behind.</summary>
 public sealed class AngleFilter
 {
-    // 1.2 Hz when still; + 0.02 Hz per deg/s of turning (a 180 deg/s spin: ~4.8 Hz, about 30 ms of lag)
-    const double MinCutoff = 1.2, Beta = 0.02, SpeedCutoff = 1.0;
+    // 1.5 Hz when still; + 0.06 Hz per deg/s of turning; the turning speed itself followed at 4 Hz (was 1 Hz,
+    // which held the cut-off low for the first ~150 ms of every turn). On synthetic 60 Hz spins
+    // (scratch bench): a 360 deg/s turn trailed by 8 deg instead of 22, settled in 21 ms instead of 90.
+    const double MinCutoff = 1.5, Beta = 0.06, SpeedCutoff = 4.0;
+    // Two readings in a row this far off, and agreeing with each other, are a real jump (a flick of the
+    // camera): taken at once. One alone is treated as noise.
+    const double SnapDeg = 20, SnapAgree = 12;
     double value, speed;
+    double? pending;
     DateTime last;
 
-    public double Reset(double angle, DateTime now) { value = angle; speed = 0; last = now; return value; }
+    public double Reset(double angle, DateTime now) { value = angle; speed = 0; pending = null; last = now; return value; }
 
     public double Next(double angle, DateTime now)
     {
         double dt = Math.Clamp((now - last).TotalSeconds, 1e-3, 0.5);
         last = now;
         double d = ((angle - value) % 360 + 540) % 360 - 180;     // the short way round
+        if (Math.Abs(d) >= SnapDeg)
+        {
+            bool agrees = pending is double p && Math.Abs(((angle - p) % 360 + 540) % 360 - 180) < SnapAgree;
+            pending = angle;
+            if (agrees) { speed = 0; pending = null; return value = angle; }
+        }
+        else pending = null;
         speed += Alpha(SpeedCutoff, dt) * (d / dt - speed);
         value = ((value + Alpha(MinCutoff + Beta * Math.Abs(speed), dt) * d) % 360 + 360) % 360;
         return value;
     }
 
     static double Alpha(double cutoff, double dt) => 1 / (1 + 1 / (2 * Math.PI * cutoff * dt));
+}
+
+/// <summary>Light smoothing for the arrow's facing: readings come in 2.5 deg steps and flicker
+/// between neighbours, so a change of up to SnapDeg is eased in (time constant tau); a bigger one
+/// is a real turn and is taken at once. (Was a fixed 0.6 blend per reading: a 360 deg/s turn trailed
+/// by 23 deg and took 130 ms to settle; now 7 deg and 21 ms, with less wobble at rest.)</summary>
+public sealed class HeadingSmoother
+{
+    const double SnapDeg = 6;
+    double? value;
+    DateTime last;
+
+    public void Reset() => value = null;
+
+    public double Next(double angle, DateTime now, double tau)
+    {
+        double dt = Math.Clamp((now - last).TotalSeconds, 1e-3, 0.5);
+        last = now;
+        if (value is not double v) return (value = angle).Value;
+        double d = ((angle - v) % 360 + 540) % 360 - 180;
+        if (Math.Abs(d) > SnapDeg || tau <= 0) return (value = angle).Value;
+        return (value = ((v + (1 - Math.Exp(-dt / tau)) * d) % 360 + 360) % 360).Value;
+    }
 }
 
 /// (written by the engine's heading loop, read on the UI thread).</summary>
@@ -181,12 +217,17 @@ public sealed class Engine : IDisposable
         thread.Start();
         headingThread = new Thread(HeadingLoop) { IsBackground = true, Name = "SanctumHelper heading", Priority = ThreadPriority.BelowNormal };
         headingThread.Start();
-        // Precompute map features off the hot path.
-        ThreadPool.QueueUserWorkItem(_ =>
-        {
-            try { features.Prepare(db.Candidates(EffectiveDifficulty)); } catch (Exception e) { Log.Write("prepare: " + e); }
-        });
+        // (Map features are no longer worked out here for every candidate layout: that loaded every layout's map
+        // art at startup and kept it, ~510 MB while idle, for a fallback that only ever runs on the locked layout.
+        // Lock prepares that one.)
+        if (CurrentLayout != null) PrepareFeatures(CurrentLayout);
     }
+
+    /// <summary>The locked layout's map features (for the feature-matching fallback), off the hot path.</summary>
+    void PrepareFeatures(Layout l) => ThreadPool.QueueUserWorkItem(_ =>
+    {
+        try { features.Prepare([l]); } catch (Exception e) { Log.Write("prepare: " + e.Message); }
+    });
 
     /// <summary>Forget the current run's layout (new run, or a wrong lock).</summary>
     public void ResetRun()
@@ -234,7 +275,8 @@ public sealed class Engine : IDisposable
         settings.RunId = gameLog.RunId;
         try { settings.Save(); } catch (Exception e) { Log.Write("save run layout: " + e.Message); }
         Log.Write($"layout locked: {l.Number} via {source}");
-        arts.Trim(n => n == l.Number); refiner.Trim(n => n == l.Number); minimap.Release(n => n == l.Number);
+        arts.Trim(n => n == l.Number); refiner.Trim(n => n == l.Number); minimap.Release(n => n == l.Number); features.Trim(n => n == l.Number);
+        PrepareFeatures(l);
         Notify?.Invoke(Lang.F("Sanctum found #{0}", l.Number), null);
         StatusChanged?.Invoke();
     }
@@ -255,7 +297,7 @@ public sealed class Engine : IDisposable
                     CurrentLayout = null; lastPose = null; player = null; minimap.Reset();
                     onIsland = false; islandPlayer = null; islandPose = null; islandTracker.Reset();
                     ClearGuesses();
-                    arts.Trim(_ => false); refiner.Trim(_ => false); minimap.Release();
+                    arts.Trim(_ => false); refiner.Trim(_ => false); minimap.Release(); features.Trim(_ => false);
                     settings.RunLayout = 0;
                     try { settings.Save(); } catch { /* not critical */ }
                     StatusChanged?.Invoke();
@@ -284,7 +326,23 @@ public sealed class Engine : IDisposable
                 {
                     nextPerfLog = now + 10000;
                     var mem = System.Diagnostics.Process.GetCurrentProcess().PrivateMemorySize64 / (1 << 20);
-                    Log.Write($"perf: track {perfTrack.Report()} · heading {perfHeading.Report()} · ocr {perfOcr.Report()} · overlay {OverlayView.Perf.Report()} · {mem} MB");
+                    // OpenCV's pictures live outside .NET's memory, so .NET doesn't see them pile up: one that
+                    // isn't disposed waits for a collection, and with little else allocating (in a run, no party
+                    // screen reads) that can be minutes - a report showed 850 MB growing to 1.4 GB again and again.
+                    // Grown by 150 MB since the last collection: collect now, and say what that freed.
+                    if (mem - memAfterCollect > 150)
+                    {
+                        GC.Collect();
+                        GC.WaitForPendingFinalizers();
+                        GC.Collect();
+                        var after = System.Diagnostics.Process.GetCurrentProcess().PrivateMemorySize64 / (1 << 20);
+                        Log.Write($"memory: collected {mem - after} MB ({mem} -> {after} MB)");
+                        memAfterCollect = mem = after;
+                    }
+                    else if (mem < memAfterCollect) memAfterCollect = mem;     // (the first line sets it)
+                    Log.Write($"perf: track {perfTrack.Report()} · heading {perfHeading.Report()} · ocr {perfOcr.Report()} · overlay {OverlayView.Perf.Report()} · {mem} MB"
+                        + $" · capture {perfSource}{(perfSource.StartsWith("shared") ? $" ({SharedCapture.CopyMs:0.0} ms)" : "")}"
+                        + $" · run timer {lastTimerScore:0.00}{(InRun ? " (in a run)" : "")}");
                 }
                 if (settings.UseGameLog && now >= nextGameLog)
                 {
@@ -313,17 +371,35 @@ public sealed class Engine : IDisposable
                 if (show && !wasShowing) { miniShowing = false; heldSince = now; Log.Write($"overlay key down ({(padDown ? "controller " + Gamepad.Name(settings.HoldButton) : KeyHook.Name(hook.Key))})"); }
                 if (show)
                 {
-                    // One window capture per frame: it says whether the in-game map is open, and
-                    // feeds either the full-map overlay or (map closed) the big zoom map.
+                    // The in-game map open: one window capture for the full-map overlay. Closed: the
+                    // big zoom map, tracked from the HUD corner like the on-screen map. Which one is
+                    // decided from the map screen's title corner alone (a 4K window copy is ~33 MB,
+                    // and the big map used to take one every tick only to look at that corner).
                     var c0 = game.Client;
-                    using (var frame = Grab(new Rect(0, 0, c0.Width, c0.Height)))
+                    bool bigOk = !onIsland && (settings.ForcedLayout != 0 || CurrentLayout != null) && InRun;
+                    // The title corner first in every case: with the map closed and no big map to show (open
+                    // world, hub, layout unknown), a whole window was copied ~60 times a second only to find that.
+                    // (Open on the last tick: straight to the whole copy, whose map check runs again.)
+                    bool mapOpen = !bigOk && doors.LastMapOpen;
+                    if (!mapOpen)
+                        using (var head = Grab(MapTitleRect(c0)))
+                            mapOpen = MapScreenOpen(head, c0);
+                    if (mapOpen)
                     {
-                        bool bigOk = !onIsland && (settings.ForcedLayout != 0 || CurrentLayout != null) && InRun;
-                        if (!bigOk || MapScreenOpen(frame)) ShowMap(frame);
-                        else { TrackMinimap(frame); ShowBig(); }
+                        using var frame = Grab(new Rect(0, 0, c0.Width, c0.Height));
+                        ShowMap(frame);
+                    }
+                    else if (!bigOk) ShowMap(null);
+                    else
+                    {
+                        // A fix per new corner copy (the same picture twice gives the same fix).
+                        if (NewCorner || now - lastBigFix >= 40) { lastBigFix = now; TrackMinimap(); }
+                        ShowBig();
                     }
                     wasShowing = true;
-                    Thread.Sleep(15);
+                    // Next frame ~16 ms after this one started (was a flat 15 ms after it ended).
+                    int left = 16 - (int)(sw.ElapsedMilliseconds - now);
+                    Thread.Sleep(Math.Max(1, left));
                     continue;
                 }
                 if (wasShowing)
@@ -338,26 +414,35 @@ public sealed class Engine : IDisposable
                 bool inRunNow = InRun || GameLogPlace is GameLog.Place.Island or GameLog.Place.Sanctum;
                 if (now >= nextOcr && settings.Difficulty == "Auto" && ocr.Available && !inRunNow)
                 {
-                    nextOcr = now + 500;
+                    // Each read copies the game window (PrintWindow draws all of it): with the game behind another
+                    // window, every 1.5 s is enough to catch the party screen (was every 0.5 s whatever was in front).
+                    nextOcr = now + (game.IsForeground ? 500 : 1500);
                     var t0 = perfClock.ElapsedTicks;
                     ReadPartyScreen();
                     perfOcr.Add(perfClock.ElapsedTicks - t0);
                 }
                 if (!game.IsForeground) { HideMini(); Thread.Sleep(250); continue; }
-                if (now >= nextMinimap && settings.TrackMinimap)
+                // Faster while the on-screen map follows the player; tracking is cheap then.
+                // On the island there may be no Sanctum layout yet; it still needs fast updates.
+                // In a run with the layout still unknown too: that is when the run timer, the
+                // HUD and the layout guess need reading (was every 350 ms).
+                bool following = settings.MiniMapMode != "Off" && (CurrentLayout != null || onIsland);
+                bool fast = following || InRun;
+                // While fast, each fix uses the heading loop's newest corner copy as soon as it lands
+                // (it copies one per desktop frame), at most every 25 ms: ~40 fixes a second, each
+                // ~10 ms. (Was a fix every ~50 ms from a copy up to 60 ms old: up to ~110 ms behind.)
+                if (now >= nextMinimap && settings.TrackMinimap && (!fast || NewCorner || now >= nextMinimap + 40))
                 {
-                    // Faster while the on-screen map follows the player; tracking is cheap then.
-                    // On the island there may be no Sanctum layout yet; it still needs fast updates.
-                    bool following = settings.MiniMapMode != "Off" && (CurrentLayout != null || onIsland);
-                    // ~20 fixes a second while following: the shared corner grab is ~30 a second,
-                    // and more fixes than that only re-track the same frame.
-                    nextMinimap = now + (following ? 40 : 350);
+                    nextMinimap = now + (fast ? 25 : 350);
                     var t1 = perfClock.ElapsedTicks;
                     TrackMinimap();
                     ShowMini();
                     perfTrack.Add(perfClock.ElapsedTicks - t1);
                 }
-                Thread.Sleep(15);
+                // Sleep until the next fix is due, or (while fast) until a new corner copy lands.
+                long t = sw.ElapsedMilliseconds, due = t < nextMinimap ? nextMinimap : nextMinimap + 40;
+                if (fast && settings.TrackMinimap) cornerReady.WaitOne((int)Math.Clamp(due - t, 1, 15));
+                else Thread.Sleep(15);
             }
             catch (Exception e)
             {
@@ -368,10 +453,13 @@ public sealed class Engine : IDisposable
     }
 
     bool miniShowing;
-    // ---- Facing and camera: read from the minimap on a loop of their own, ~30 times a second
-    // (the tracking tick is ~10 Hz once it has done the position), so turning the camera shows
-    // up at once; the overlay glides between readings at display rate.
+    // ---- Facing and camera: read from the minimap on a loop of their own, once per displayed
+    // frame (~60 a second), so turning the camera shows up at once; the overlay glides between
+    // readings at display rate. Each cycle's corner copy also feeds the position tracking.
     Thread? headingThread;
+    // 16 ms: one screen copy per desktop frame at 60 Hz. The copy itself waits for the desktop to
+    // compose (measured ~11 ms at any size, 1080p or 4K), reading the arrow and cone ~2-7 ms more.
+    const int HeadingPeriodMs = 16;
 
     void HeadingLoop()
     {
@@ -383,15 +471,17 @@ public sealed class Engine : IDisposable
             {
                 if (!GameFound || !game.IsForeground || !InRun) { Thread.Sleep(150); continue; }
                 var c = game.Client;
-                double ui = c.Height / 1080.0;
+                double ui = Regions.Ui(c.Width, c.Height);
                 var rc = Regions.ToClient(settings.MinimapRegion, Anchor.TopLeft, c.Width, c.Height);
                 if (rc.Width < 40) { Thread.Sleep(250); continue; }
                 // One copy of the HUD corner per cycle, for the arrow/cone here and for tracking
                 // (each screen copy waits for the desktop to compose a frame: fewer is smoother).
-                var corner = CornerRect(rc, c, ui);
+                var corner = CornerRect(rc, c);
+                long grabbed = Environment.TickCount64;
                 var top = ScreenGrabber.Grab(new Rect(c.X + corner.X, c.Y + corner.Y, corner.Width, corner.Height));
-                lock (cornerGate) { sharedCorner?.Dispose(); sharedCorner = top; sharedCornerAt = Environment.TickCount64; }
-                using (var mm = new Mat(top, rc))
+                lock (cornerGate) { sharedCorner?.Dispose(); sharedCorner = top; sharedCornerAt = grabbed; sharedCornerSeq++; }
+                cornerReady.Set();   // the tracking loop picks it up right away instead of on its next tick
+                using (var mm = new Mat(top, InCorner(rc, corner)))
                 {
                     var t2 = perfClock.ElapsedTicks;
                     UpdateHeading(mm, ui);
@@ -399,28 +489,47 @@ public sealed class Engine : IDisposable
                 }
             }
             catch (Exception e) { Log.Write("heading: " + e.Message); Thread.Sleep(500); }
-            int left = 33 - (int)(sw.ElapsedMilliseconds - t0);
+            int left = HeadingPeriodMs - (int)(sw.ElapsedMilliseconds - t0);
             if (left > 0) Thread.Sleep(left);
         }
     }
 
     readonly object cornerGate = new();
+    readonly AutoResetEvent cornerReady = new(false);
     Mat? sharedCorner;
-    long sharedCornerAt;
+    long sharedCornerAt, sharedCornerSeq, trackedCornerSeq;
 
-    /// <summary>The HUD corner: the minimap, the Esc button and the run timer below them.</summary>
-    static Rect CornerRect(Rect rc, Rect client, double ui) =>
-        new(0, 0, Math.Max(rc.Right, (int)(250 * ui)), Math.Min(client.Height, Math.Max(rc.Bottom, (int)(650 * ui))));
+    /// <summary>The HUD corner: the minimap, the Esc button and the run timer below them. It starts at the left
+    /// edge of the game's UI area (440 px in on a 3440x1440 window: the UI is a centred 16:9 box there).</summary>
+    static Rect CornerRect(Rect rc, Rect client)
+    {
+        var hud = Regions.Hud(client.Width, client.Height);
+        double ui = hud.Height / 1080.0;
+        return new Rect(hud.X, 0, Math.Min(client.Width - hud.X, Math.Max(rc.Right - hud.X, (int)(250 * ui))),
+            Math.Min(client.Height, Math.Max(rc.Bottom, (int)(650 * ui))));
+    }
+
+    /// <summary>The minimap (client px) inside a corner copy.</summary>
+    static Rect InCorner(Rect rc, Rect corner) => new(rc.X - corner.X, rc.Y - corner.Y, rc.Width, rc.Height);
 
     /// <summary>A copy of the heading loop's latest corner grab when it is fresh (null otherwise).</summary>
-    Mat? TakeSharedCorner(Rect corner)
+    Mat? TakeSharedCorner(Rect corner, ref DateTime copiedAt)
     {
         lock (cornerGate)
         {
-            if (sharedCorner == null || Environment.TickCount64 - sharedCornerAt > 60 || sharedCorner.Width != corner.Width || sharedCorner.Height != corner.Height)
+            // 40 ms (was 60): the heading loop copies one every ~16 ms, so anything older means it is stalled.
+            if (sharedCorner == null || Environment.TickCount64 - sharedCornerAt > 40 || sharedCorner.Width != corner.Width || sharedCorner.Height != corner.Height)
                 return null;
+            trackedCornerSeq = sharedCornerSeq;
+            copiedAt = DateTime.UtcNow.AddMilliseconds(sharedCornerAt - Environment.TickCount64);
             return sharedCorner.Clone();
         }
+    }
+
+    /// <summary>The heading loop has copied a corner the tracking hasn't used yet.</summary>
+    bool NewCorner
+    {
+        get { lock (cornerGate) return sharedCorner != null && sharedCornerSeq != trackedCornerSeq && Environment.TickCount64 - sharedCornerAt <= 40; }
     }
 
     void UpdateHeading(Mat mm, double ui)
@@ -431,7 +540,8 @@ public sealed class Engine : IDisposable
         // missing it is only retried twice a second, as its full search is the costly part.
         double? hint = heading is double hp && (now - headingTime).TotalSeconds < 0.5 && headingFromArrow ? hp : null;
         double? h = null;
-        double weight = 0.6;
+        // Arrow readings are eased in over ~60 ms (they flicker between 2.5-degree steps), a real turn at once.
+        double tau = 0.06;
         if (now >= arrowRetry)
         {
             h = headingDetector.Detect(mm, ui, hint);
@@ -450,16 +560,13 @@ public sealed class Engine : IDisposable
             cameraTime = now;
             // A blink of the arrow (particles) keeps the last heading; only a lasting absence means
             // egg form. (Camera and character can face different ways: switching would jump.)
-            if (h == null && (now - lastArrowSeen).TotalSeconds > 0.6) { h = ch; weight = 0.45; }
+            // The cone reading is already smoothed by its filter: taken as it is (no second smoothing).
+            if (h == null && (now - lastArrowSeen).TotalSeconds > 0.6) { h = camera; tau = 0; }
         }
         if (h is double hv)
         {
-            if (heading is double prev && (now - headingTime).TotalSeconds < 1)
-            {
-                double d = ((hv - prev) % 360 + 540) % 360 - 180;
-                heading = (prev + weight * d + 360) % 360;
-            }
-            else heading = hv;
+            if (heading == null || (now - headingTime).TotalSeconds >= 1) headingSmoother.Reset();
+            heading = headingSmoother.Next(hv, now, tau);
             headingTime = now;
         }
         // Twined with an egg: no arrow, and the egg marker right where the arrow would be (an egg
@@ -482,6 +589,7 @@ public sealed class Engine : IDisposable
 
     DateTime arrowRetry, lastArrowSeen, cameraTime;
     readonly AngleFilter cameraFilter = new();
+    readonly HeadingSmoother headingSmoother = new();
     int eggVotes;
     bool eggForm;
     DateTime lastEggSeen;
@@ -534,20 +642,42 @@ public sealed class Engine : IDisposable
     }
 
     bool printWindowFailed;
+    bool sharedScreenCopy;
+    long memAfterCollect = long.MaxValue / 2;  // MB right after the last collection (set by the first perf line)                    // the overlay was hidden because shared frames are screen copies
+    string perfSource = "-";                  // where the last whole frame came from, for the perf line
     int windowCaptureMisses;
+    long firstCaptureMiss;
 
     /// <summary>A part of the game's client area (client coordinates).</summary>
     Mat Grab(Rect sub)
     {
         var c = game.Client;
+        // With the aLogs app running, whole frames come only from its shared capture (it copies the screen itself
+        // when the window gives no picture): one capture for all of aLogs. No fresh frame yet: an empty picture,
+        // which nothing matches, until the next one.
+        if (SharedCapture.AppPresent)
+        {
+            var shared = SharedCapture.TryGrab(game.Handle, c.Width, c.Height, sub);
+            if (shared != null && SharedCapture.ScreenCopy && !sharedScreenCopy)
+            {
+                sharedScreenCopy = true;
+                Log.Write("the aLogs app shares copies of the screen (the game window gives no picture): overlay hidden from recordings");
+                CaptureFallback?.Invoke();
+            }
+            perfSource = SharedCapture.ScreenCopy ? "shared screen copy" : "shared window";
+            return shared ?? new Mat(Math.Max(1, sub.Height), Math.Max(1, sub.Width), MatType.CV_8UC3, Scalar.Black);
+        }
+        perfSource = settings.RecordableOverlay && !printWindowFailed ? "own window" : "own screen copy";
         if (settings.RecordableOverlay && !printWindowFailed)
         {
             var m = ScreenGrabber.GrabWindow(game.Handle, c.Width, c.Height, sub);
             if (m != null) { windowCaptureMisses = 0; return m; }
             // A single black frame is normal (fades, loading screens): use the screen for this
             // frame only. Only a long run of them means the window can't be captured at all
-            // (e.g. exclusive fullscreen).
-            if (++windowCaptureMisses >= 40)
+            // (e.g. exclusive fullscreen). Also 3 s of them: frames now come every ~16 ms, and 40
+            // in a row would be under a second of loading screen.
+            if (windowCaptureMisses++ == 0) firstCaptureMiss = clock.ElapsedMilliseconds;
+            if (windowCaptureMisses >= 40 && clock.ElapsedMilliseconds - firstCaptureMiss > 3000)
             {
                 printWindowFailed = true;
                 Log.Write("window capture keeps giving no image; using screen capture (overlay hidden from recordings)");
@@ -578,18 +708,25 @@ public sealed class Engine : IDisposable
             Log.Write($"difficulty: {d} (\"{difficulty.LastText}\")");
             Notify?.Invoke(Lang.F("{0} Mode found.", Lang.Difficulty(d)), d);
             StatusChanged?.Invoke();
-            ThreadPool.QueueUserWorkItem(_ => { try { features.Prepare(db.Candidates(d)); } catch { } });
         }
     }
 
-    /// <summary>Is the in-game map screen showing? (Its title icon, top-left.)</summary>
-    bool MapScreenOpen(Mat frame)
+    /// <summary>The map screen's title corner (client px): 400x200 at 1080p, scaled with the game's UI and at the
+    /// left of its UI area.</summary>
+    static Rect MapTitleRect(Rect client)
     {
-        double f = 1080.0 / frame.Height;
-        var area = new Rect(0, 0, Math.Min(frame.Width, (int)(400 / f)), Math.Min(frame.Height, (int)(200 / f)));
-        using var crop = new Mat(frame, area);
+        var hud = Regions.Hud(client.Width, client.Height);
+        double f = 1080.0 / hud.Height;
+        return new Rect(hud.X, 0, Math.Min(client.Width - hud.X, (int)(400 / f)), Math.Min(client.Height, (int)(200 / f)));
+    }
+
+    /// <summary>Is the in-game map screen showing? (Its title icon, top-left.) `head` is the
+    /// MapTitleRect part of the game window.</summary>
+    bool MapScreenOpen(Mat head, Rect client)
+    {
+        double f = 1.0 / Regions.Ui(client.Width, client.Height);
         using var small = new Mat();
-        Cv2.Resize(crop, small, new Size(), f, f, InterpolationFlags.Area);
+        Cv2.Resize(head, small, new Size(), f, f, InterpolationFlags.Area);
         return doors.IsMapOpen(small);
     }
 
@@ -599,26 +736,36 @@ public sealed class Engine : IDisposable
         // revealed), so it tracks the player once the full map has identified the layout.
         var layout = settings.ForcedLayout != 0 ? db.ByNumber(settings.ForcedLayout) : CurrentLayout;
         var c = game.Client;
-        double ui = c.Height / 1080.0;
+        double ui = Regions.Ui(c.Width, c.Height);
         var rc = Regions.ToClient(settings.MinimapRegion, Anchor.TopLeft, c.Width, c.Height);
         if (rc.Width < 40) return;
         // One grab for the HUD corner: minimap, the Esc button, and the run timer below them.
-        var corner = CornerRect(rc, c, ui);
+        var corner = CornerRect(rc, c);
         // From the frame we already have, or a copy of just that corner from the screen (13 ms vs
         // 27 ms for a whole-window capture; no overlay ever draws over the HUD corner).
+        var grabbedAt = DateTime.UtcNow;     // when the picture was taken (the heading loop's copy: a few ms ago)
         using var top = fullFrame != null ? new Mat(fullFrame, corner).Clone()
-            : TakeSharedCorner(corner) ?? ScreenGrabber.Grab(new Rect(c.X + corner.X, c.Y + corner.Y, corner.Width, corner.Height));
-        UpdateInRun(top, ui);
-        // The HUD is up if either the Esc button or the run timer shows (two separate elements:
-        // particles, a dash or 4K scaling can spoil one for a moment). Only treat it as gone
-        // after half a second without either, so the on-screen map doesn't blink.
-        if (lastTimerSeen || HudVisible(top, ui)) { hudLastSeen = DateTime.UtcNow; hudVisible = true; }
-        else if ((DateTime.UtcNow - hudLastSeen).TotalSeconds > 0.5) hudVisible = false;
+            : TakeSharedCorner(corner, ref grabbedAt) ?? ScreenGrabber.Grab(new Rect(c.X + corner.X, c.Y + corner.Y, corner.Width, corner.Height));
+        // Counts of "N readings in a row" below were tuned at ~20 ticks a second: they only advance
+        // on ticks at least 45 ms apart, so they still span the same time at today's faster ticks.
+        bool slowTick = clock.ElapsedMilliseconds - lastSlowTick >= 45;
+        if (slowTick) lastSlowTick = clock.ElapsedMilliseconds;
+        // The corner at 1080p size, once for both the run timer and the Esc button (each made its own).
+        using (var small = new Mat())
+        {
+            Cv2.Resize(top, small, new Size(), 1 / ui, 1 / ui, InterpolationFlags.Area);
+            UpdateInRun(small);
+            // The HUD is up if either the Esc button or the run timer shows (two separate elements:
+            // particles, a dash or 4K scaling can spoil one for a moment). Only treat it as gone
+            // after half a second without either, so the on-screen map doesn't blink.
+            if (lastTimerSeen || HudVisible(small)) { hudLastSeen = DateTime.UtcNow; hudVisible = true; }
+            else if ((DateTime.UtcNow - hudLastSeen).TotalSeconds > 0.5) hudVisible = false;
+        }
         if (!InRun) return;
         // A chest, shop or other screen covering the HUD (timer match ~0.27 under it, vs 0.65+
         // for the usual flicker): the minimap is hidden, so skip it instead of counting misses.
         if (lastTimerScore < 0.5 && !timerTemplate!.Empty()) return;
-        using var mm = new Mat(top, rc);
+        using var mm = new Mat(top, InCorner(rc, corner));
         var now = DateTime.UtcNow;
         bool logNow = clock.ElapsedMilliseconds - lastMinimapLog > 3000;
         if (logNow) lastMinimapLog = clock.ElapsedMilliseconds;
@@ -631,7 +778,7 @@ public sealed class Engine : IDisposable
             : LooksOutside(mm);
         // Back inside: a few Sanctum-looking minimaps in a row end island mode, whether or not a
         // Sanctum layout is known yet (a run can start outside).
-        insideStreak = islandLike ? 0 : insideStreak + 1;
+        if (slowTick) insideStreak = islandLike ? 0 : insideStreak + 1;
         if (onIsland && insideStreak >= 3)
         {
             onIsland = false;
@@ -649,7 +796,7 @@ public sealed class Engine : IDisposable
         }
         // That decides which map the minimap is matched against: the island minimap is mostly
         // light grey and can pass as Sanctum floor, and Sanctum views can near-tie on the island.
-        outsideStreak = islandLike ? outsideStreak + 1 : 0;
+        if (slowTick) outsideStreak = islandLike ? outsideStreak + 1 : 0;
         bool trySanctum = !islandLike && layout != null;
 
         if (trySanctum)
@@ -677,7 +824,8 @@ public sealed class Engine : IDisposable
                 if (onIsland) Log.Write("back in the Sanctum");
                 onIsland = false;
                 player = pos;
-                playerTime = minimapTime = sanctumOkTime = now;
+                minimapTime = sanctumOkTime = now;
+                playerTime = grabbedAt;   // the overlay leads the fix by the picture's age
                 return;
             }
         }
@@ -735,7 +883,7 @@ public sealed class Engine : IDisposable
                 return;
             }
             // Not there (yet): loading, or already walked off. Fall back to searching after ~3 s.
-            if (++islandArrivalTries > 40) islandArrival = null;
+            if (slowTick && ++islandArrivalTries > 40) islandArrival = null;
             return;
         }
         // A whole-island search takes a second or two: it runs in the background so tracking, the
@@ -783,7 +931,9 @@ public sealed class Engine : IDisposable
             // A first whole-island hit is confirmed by tracking on from it: the next few quick
             // local fixes must also succeed (works while running; a wrong hit fails at once).
             if (fromSearch) { islandProbation = 4; Log.Write("island candidate: confirming by local tracking"); return; }
-            if (islandProbation > 1) { islandProbation--; Log.Write($"island candidate: local fix {islandTracker.LastInfo}"); return; }
+            // (Counted on slow ticks only, so the player has moved between the counted fixes;
+            // every fix in between must still succeed.)
+            if (islandProbation > 1) { if (slowTick) { islandProbation--; Log.Write($"island candidate: local fix {islandTracker.LastInfo}"); } return; }
             islandProbation = 0;
         }
         if (onIsland && dead is Point2d d1)
@@ -801,7 +951,7 @@ public sealed class Engine : IDisposable
         if (!onIsland) Log.Write("on the island");
         onIsland = true;
         islandPlayer = ip;
-        islandTime = now;
+        islandTime = grabbedAt;
     }
 
     void MoveOnIsland(Point2d at, DateTime now)
@@ -868,6 +1018,14 @@ public sealed class Engine : IDisposable
             Log.Write("game log: new run, forgetting the last layout");
             ResetRun();
         }
+        // Into a Sanctum with its layout still unknown: load the candidates' map art now, in the background, so the
+        // first rounds of identifying the layout don't wait for it (~50 ms a layout, ~1 s for all of them). Map art is
+        // no longer kept loaded while idle; Lock and the end of a run let it go again.
+        if (where == GameLog.Place.Sanctum && CurrentLayout == null && settings.ForcedLayout == 0)
+        {
+            var cands = db.Candidates(EffectiveDifficulty);
+            ThreadPool.QueueUserWorkItem(_ => { try { foreach (var l in cands) arts.Get(l); } catch (Exception e) { Log.Write("preload: " + e.Message); } });
+        }
         switch (where)
         {
             case GameLog.Place.Sanctum when onIsland:
@@ -890,7 +1048,7 @@ public sealed class Engine : IDisposable
         StatusChanged?.Invoke();
     }
 
-    long lastMinimapLog = -10000;
+    long lastMinimapLog = -10000, lastSlowTick = -10000;
     DateTime? misfitSince;
     string? islandArrival;
     int islandArrivalTries;
@@ -962,11 +1120,14 @@ public sealed class Engine : IDisposable
     double lastTimerScore;
     bool lastTimerSeen;
 
-    void UpdateInRun(Mat topLeft, double ui)
+    /// <param name="small">The HUD corner at 1080p size.</param>
+    void UpdateInRun(Mat small)
     {
         // Compared on brightness only (HSV value): the timer turns red under 3 minutes, and red
         // and white are the same brightness (measured: red 0.56-0.77 in colour, 0.92-0.99 here).
-        timerTemplate ??= ValueChannel(Cv2.ImRead(System.IO.Path.Combine(db.Root, "icons", "hud_timer.png")));
+        if (timerTemplate == null)
+            using (var t = Cv2.ImRead(System.IO.Path.Combine(db.Root, "icons", "hud_timer.png")))
+                timerTemplate = t.Empty() ? new Mat() : ValueChannel(t);
         if (redTimer == null)
         {
             var tpl = Cv2.ImRead(System.IO.Path.Combine(db.Root, "icons", "hud_timer_red.png"));
@@ -978,14 +1139,13 @@ public sealed class Engine : IDisposable
         bool seen = true;
         if (!timerTemplate.Empty())
         {
-            using var small = new Mat();
-            Cv2.Resize(topLeft, small, new Size(), 1 / ui, 1 / ui, InterpolationFlags.Area);
             var area = new Rect(15, 340, 140, 320).Intersect(new Rect(0, 0, small.Width, small.Height));
             seen = false;
             if (area.Width > timerTemplate.Width && area.Height > timerTemplate.Height)
             {
                 using var res = new Mat();
-                using var v = ValueChannel(new Mat(small, area));
+                using var part = new Mat(small, area);
+                using var v = ValueChannel(part);
                 Cv2.MatchTemplate(v, timerTemplate, res, TemplateMatchModes.CCoeffNormed);
                 Cv2.MinMaxLoc(res, out _, out double max, out _, out _);
                 // Under 3 minutes the stopwatch becomes a red disc with a white running figure:
@@ -1026,12 +1186,17 @@ public sealed class Engine : IDisposable
             Log.Write("no Egg Heist run on screen for 90 s: forgetting the layout");
             ResetRun();
         }
+        // No run and no layout (e.g. map art loaded for a Sanctum that was left before it was identified): let the
+        // map art go, so it isn't held while idle.
+        else if (CurrentLayout == null && guesses.Count == 0 && arts.Loaded > 0 && (now - lastRunSeen).TotalSeconds > 90)
+        {
+            arts.Trim(_ => false); refiner.Trim(_ => false); minimap.Release(); features.Trim(_ => false);
+        }
         if (!InRun) HideMini();
     }
 
     static Mat ValueChannel(Mat bgr)
     {
-        if (bgr.Empty()) return bgr;
         using var hsv = new Mat();
         Cv2.CvtColor(bgr, hsv, ColorConversionCodes.BGR2HSV);
         return hsv.ExtractChannel(2);
@@ -1196,12 +1361,11 @@ public sealed class Engine : IDisposable
 
     /// <summary>Normal play (not a menu, the full map or a loading screen): the minimap's Esc
     /// button is on screen. Measured 0.96-1.0 in play, 0.28 on the map screen.</summary>
-    bool HudVisible(Mat topLeft, double ui)
+    /// <param name="small">The HUD corner at 1080p size.</param>
+    bool HudVisible(Mat small)
     {
         hudTemplate ??= Cv2.ImRead(System.IO.Path.Combine(db.Root, "icons", "hud_esc.png"));
         if (hudTemplate.Empty()) return true;
-        using var small = new Mat();
-        Cv2.Resize(topLeft, small, new Size(), 1 / ui, 1 / ui, InterpolationFlags.Area);
         if (small.Width < hudTemplate.Width || small.Height < hudTemplate.Height) return true;
         using var res = new Mat();
         Cv2.MatchTemplate(small, hudTemplate, res, TemplateMatchModes.CCoeffNormed);
@@ -1227,12 +1391,18 @@ public sealed class Engine : IDisposable
         return f;
     }
 
-    long heldSince, lastMatchLog = -10000, lastWideSearch = -10000;
+    long heldSince, lastMatchLog = -10000, lastWideSearch = -10000, lastBigFix = -10000;
+    // The last exact (floor-refined) fit of the full map from the doors, and where the doors were then.
+    MapPose? fit;
+    Point2d? fitO, fitB, prevDoorO;
+    long fitAt;
     readonly Stopwatch clock = Stopwatch.StartNew();
 
-    void ShowMap(Mat frame)
+    /// <param name="frame">The game window, or null when its map screen is known to be closed.</param>
+    void ShowMap(Mat? frame)
     {
         var c = game.Client;
+        if (frame == null) doors.MarkClosed();
         // Out on the island (or not seen in the Sanctum for a while and the island fits): the
         // island map has door icons too (Sanctum entrances), so the door method must not run.
         if (settings.IslandMap && db.Island is Layout isl && onIsland)
@@ -1261,11 +1431,12 @@ public sealed class Engine : IDisposable
         // of them fits.
         if (settings.ForcedLayout == 0) all = db.Candidates(null);
         var favoured = difficultyDoubted || EffectiveDifficulty == null ? null : db.Candidates(EffectiveDifficulty).Select(l => l.Number).ToHashSet();
-        var pose = doors.Match(frame, all, out var arrow, tracked, favoured);
+        Point2d? arrow = null;
+        var pose = frame == null ? null : doors.Match(frame, all, out arrow, tracked, favoured);
         LastMatchInfo = doors.LastInfo;
         if (pose == null && CurrentLayout != null && all.Count > 1 && doors.LastMapOpen && doors.LastOrange != null && doors.LastBlue != null)
         {
-            pose = doors.Match(frame, [CurrentLayout], out arrow);
+            pose = doors.Match(frame!, [CurrentLayout], out arrow);
             if (pose != null) LastMatchInfo += " | kept " + CurrentLayout.Title;
         }
         bool logMatch = false;
@@ -1280,7 +1451,7 @@ public sealed class Engine : IDisposable
         var doorPose = pose;
         MapPose? guess = doorPose;
         string src = doorPose != null ? "doors" : "";
-        using var panNow = doors.LastMapOpen ? PanImage(frame) : null;
+        using var panNow = doors.LastMapOpen ? PanImage(frame!) : null;
         if (guess == null && panNow != null && prevGray != null && prevGrayPose != null && prevGray.Size() == panNow.Size())
         {
             using var win = new Mat();
@@ -1303,25 +1474,48 @@ public sealed class Engine : IDisposable
         }
         if (guess == null && doors.LastMapOpen && lastPose != null) { guess = lastPose; src = "last"; }
 
-        if (guess != null && doors.LastMapOpen)
+        // The doors place the map on every frame (~10 ms); the floor fit that makes it exact costs up to
+        // ~0.4 s once much is explored (measured on a fully explored 1080p-4K map), and was redone on every
+        // frame, so a pan or zoom showed up that late. Now: while the doors stay put, the last fit still
+        // holds (checked again every 1.5 s); while they move at the same zoom (a pan), the fit moves with
+        // them; once they stop somewhere new, or the zoom changes, a new fit is made.
+        bool reused = false;
+        var doorO = doors.LastOrange;
+        if (src == "doors" && fit != null && fit.Layout.Number == doorPose!.Layout.Number
+            && doorO is Point2d o && doors.LastBlue is Point2d bl && fitO is Point2d fo && fitB is Point2d fb)
+        {
+            double tol = 2.5 * Regions.Ui(c.Width, c.Height);   // door icons are found in 2 px steps (1080p)
+            static double Dist(Point2d a, Point2d b) => Math.Sqrt((a.X - b.X) * (a.X - b.X) + (a.Y - b.Y) * (a.Y - b.Y));
+            bool sameZoom = Math.Abs(Dist(o, bl) / Math.Max(1, Dist(fo, fb)) - 1) < 0.015;
+            bool still = Dist(o, fo) <= tol;
+            bool moving = prevDoorO is Point2d po && Dist(o, po) > tol;
+            if (sameZoom && still && clock.ElapsedMilliseconds - fitAt < 1500) { pose = fit; reused = true; LastMatchInfo += " | doors still: last fit"; }
+            else if (sameZoom && !still && moving) { pose = fit with { Tx = fit.Tx + o.X - fo.X, Ty = fit.Ty + o.Y - fo.Y }; reused = true; LastMatchInfo += " | doors moving: last fit moved along"; }
+        }
+        prevDoorO = src == "doors" ? doorO : null;
+        if (guess != null && doors.LastMapOpen && !reused)
         {
             bool sure = src == "doors";
-            var refined = refiner.Refine(frame, guess, sure ? 0.06 : 0.15, sure ? 40 : 120);
+            var refined = refiner.Refine(frame!, guess, sure ? 0.06 : 0.15, sure ? 40 : 120);
             double need = sure ? 0.5 : 0.45;
             if ((refined == null || refiner.LastScore < need) && !sure && clock.ElapsedMilliseconds - lastWideSearch > 500)
             {
                 // Zoomed or panned a lot since the last fit: search much wider (slower, so not every frame).
                 lastWideSearch = clock.ElapsedMilliseconds;
-                refined = refiner.Refine(frame, guess, 0.45, 320);
+                refined = refiner.Refine(frame!, guess, 0.45, 320);
             }
-            if (refined != null && refiner.LastScore >= need) { pose = refined; LastMatchInfo += $" | {src} + {refiner.LastInfo}"; }
-            else if (sure) { pose = doorPose; LastMatchInfo += $" | doors only ({refiner.LastInfo})"; }
+            if (refined != null && refiner.LastScore >= need)
+            {
+                pose = refined; LastMatchInfo += $" | {src} + {refiner.LastInfo}";
+                if (sure) { fit = refined; fitO = doors.LastOrange; fitB = doors.LastBlue; fitAt = clock.ElapsedMilliseconds; }
+            }
+            else if (sure) { pose = doorPose; fit = null; LastMatchInfo += $" | doors only ({refiner.LastInfo})"; }
             else if (src is "pan" or "one door") { pose = guess; LastMatchInfo += $" | {src} only ({refiner.LastInfo})"; }
             else LastMatchInfo += $" | lost ({refiner.LastInfo})";
         }
         if (pose == null && doors.LastMapOpen && cands.Count == 1)
         {
-            pose = matcher.Match(frame, cands, lastPose);
+            pose = matcher.Match(frame!, cands, lastPose);
             LastMatchInfo += " | features " + matcher.LastInfo;
         }
         if (pose != null && panNow != null)
@@ -1349,7 +1543,7 @@ public sealed class Engine : IDisposable
         {
             pose = lastPose; // brief miss (animation, cursor over the map): keep the last fit
         }
-        else if (settings.SaveDebugFrames)
+        else if (settings.SaveDebugFrames && frame != null)
         {
             SaveDebug(frame, "nomatch");
         }
@@ -1371,12 +1565,13 @@ public sealed class Engine : IDisposable
 
     /// <summary>Full map on the island: feature matching against the island art. Returns false
     /// when the screen isn't the island map (so the Sanctum methods can run).</summary>
-    bool ShowIslandMap(Mat frame, Layout isl)
+    bool ShowIslandMap(Mat? frame, Layout isl)
     {
         var c = game.Client;
-        doors.Match(frame, [], out var arrow); // map-open check + the player's arrow
+        Point2d? arrow = null;
+        if (frame != null) doors.Match(frame, [], out arrow); // map-open check + the player's arrow
         if (!doors.LastMapOpen) { Frame?.Invoke(new OverlayFrame(c, false, isl, null, null, false, EffectiveDifficulty, "")); return true; }
-        var pose = matcher.Match(frame, [isl], islandPose);
+        var pose = matcher.Match(frame!, [isl], islandPose);
         LastMatchInfo = "island " + matcher.LastInfo;
         if (clock.ElapsedMilliseconds - lastMatchLog > 1000)
         {
@@ -1403,6 +1598,16 @@ public sealed class Engine : IDisposable
         lastDebugSave = DateTime.UtcNow;
         var dir = Path.Combine(Settings.Dir, "debug");
         Directory.CreateDirectory(dir);
+        // Kept small: a frame every 3 s (a 4K one is ~1-2 MB) used to pile up for as long as the option stayed on.
+        // The newest 200 frames stay, and info.txt starts over past 2 MB like the log.
+        try
+        {
+            var old = new DirectoryInfo(dir).GetFiles("*.jpg").OrderByDescending(f => f.LastWriteTimeUtc).Skip(199);
+            foreach (var f in old) f.Delete();
+            var info = new FileInfo(Path.Combine(dir, "info.txt"));
+            if (info.Exists && info.Length > 2_000_000) info.Delete();
+        }
+        catch (Exception e) { Log.Write("debug frames: " + e.Message); }
         Cv2.ImWrite(Path.Combine(dir, $"{DateTime.Now:yyyyMMdd_HHmmss}_{tag}.jpg"), frame);
         File.AppendAllText(Path.Combine(dir, "info.txt"), $"{DateTime.Now:HH:mm:ss} {tag} {matcher.LastInfo}{Environment.NewLine}");
     }

@@ -7,13 +7,15 @@ using OpenCvSharp;
 namespace SanctumHelper;
 
 /// <summary>Reads the game frame the aLogs app shares with its modules, so the game window is
-/// copied once instead of once per tool. When the app isn't running (standalone Sanctum Helper)
-/// or its frame is stale, TryGrab returns null and the normal window capture is used.
+/// copied once instead of once per tool. While the app runs, whole frames come only from here
+/// (Engine.Grab waits for the next one); when it isn't running (standalone Sanctum Helper), TryGrab
+/// returns null and the normal window capture is used.
 ///
 /// Layout of "Local\aLogs.Capture.v1" (little-endian; written by aLogs app/src-tauri/src/capture.rs):
 ///   0 u32 magic "ALCP", 4 u32 version, 8 u64 seq (odd while writing),
-///   16 u32 width, 20 u32 height, 24 u32 stride, 28 u32 flags (bit 0 = valid image),
-///   32 u64 frame time (unix ms), 40 u64 window handle, 48/52 i32 client x/y,
+///   16 u32 width, 20 u32 height, 24 u32 stride, 28 u32 flags (bit 0 = valid image, bit 1 = a copy of
+///   the screen: the game window gives no picture on this PC), 32 u64 frame time (unix ms),
+///   40 u64 window handle, 48/52 i32 client x/y, 60 u32 how long the copy took (microseconds),
 ///   64 request slots: 16 x { u64 wanted until (unix ms), u32 interval ms, u32 process id },
 ///   4096 pixels, BGRA, top row first.</summary>
 public static class SharedCapture
@@ -40,6 +42,17 @@ public static class SharedCapture
 
     /// <summary>Set false to never use the shared frame.</summary>
     public static bool Enabled { get; set; } = true;
+
+    /// <summary>The aLogs app is running and sharing its capture: then whole frames come only from it (one
+    /// capture for all of aLogs), and we wait for its next frame instead of copying the window ourselves.</summary>
+    public static bool AppPresent { get { if (!Enabled) return false; lock (gate) return Open(); } }
+
+    /// <summary>The last frame we took was a copy of the screen (flags bit 1: the game window gives no picture on
+    /// this PC), so our overlay must be hidden from capture or it would show up in the frames.</summary>
+    public static bool ScreenCopy { get; private set; }
+
+    /// <summary>How long the app took to copy the last frame we took (ms).</summary>
+    public static double CopyMs { get; private set; }
 
     static long NowMs => DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
@@ -101,8 +114,10 @@ public static class SharedCapture
         lock (gate)
         {
             long t = Environment.TickCount64;
-            // Ask at the pace we're being called (about 10 a second while tracking).
-            if (lastCall != 0) interval = Math.Clamp(0.7 * interval + 0.3 * (t - lastCall), 40, 1000);
+            // Ask at the pace we're being called: ~60 a second while the overlay key is held (down to
+            // 16 ms, was 40: a frame could be 40 ms old before we even read it), twice a second on the
+            // party screen, nothing otherwise (the request lapses).
+            if (lastCall != 0) interval = Math.Clamp(0.7 * interval + 0.3 * (t - lastCall), 16, 1000);
             lastCall = t;
             if (!Open()) return null;
             long now = NowMs;
@@ -113,7 +128,9 @@ public static class SharedCapture
                 if ((seq & 1) != 0) { Thread.SpinWait(200); continue; }
                 int w = (int)U32(16), h = (int)U32(20), stride = (int)U32(24);
                 if ((U32(28) & 1) == 0 || I64(40) != (long)hwnd || w != clientW || h != clientH) return null;
-                if (now - I64(32) > Math.Max(150, 2 * interval)) return null;
+                // Too old: take our own copy instead (was up to 150 ms accepted at any pace). Not much
+                // less than 100 ms: a whole 4K window copy takes ~30-70 ms, so our own wouldn't be newer.
+                if (now - I64(32) > Math.Max(100, 2 * interval)) return null;
                 sub = sub.Intersect(new Rect(0, 0, w, h));
                 if (sub.Width <= 0 || sub.Height <= 0) return null;
                 var src = basePtr + Header + sub.Y * stride + sub.X * 4;
@@ -122,6 +139,8 @@ public static class SharedCapture
                 Cv2.CvtColor(bgra, bgr, ColorConversionCodes.BGRA2BGR);
                 if (Seq() == seq)
                 {
+                    ScreenCopy = (U32(28) & 2) != 0;
+                    CopyMs = U32(60) / 1000.0;
                     if (!announced) { announced = true; Log.Write("using the aLogs app's shared capture"); }
                     lastUsed = Environment.TickCount64;
                     return bgr;

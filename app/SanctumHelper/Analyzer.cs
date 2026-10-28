@@ -78,7 +78,7 @@ public static class Analyzer
             sw.Restart();
             known = pose?.Layout ?? known ?? (forcedLayout != 0 ? db.ByNumber(forcedLayout) : null);
             mini.Reset(); // screenshots are far apart in time: always a full search
-            Point2d? mpos = known != null ? mini.Locate(mm, known, frame.Height / 1080.0) : null;
+            Point2d? mpos = known != null ? mini.Locate(mm, known, Regions.Ui(frame.Width, frame.Height)) : null;
             var hit = mpos is Point2d mp ? ((Layout layout, Point2d pos, double score)?)(known!, mp, mini.LastScore) : null;
             report.AppendLine($"  minimap ({sw.ElapsedMilliseconds} ms): {(hit == null ? "none" : $"layout {hit.Value.layout.Number} at ({hit.Value.pos.X:0},{hit.Value.pos.Y:0}) score {hit.Value.score:0.00}")}");
             report.AppendLine($"    {mini.LastInfo}");
@@ -91,7 +91,7 @@ public static class Analyzer
                 {
                     var t = new MinimapTracker(arts);
                     t.Seed(new Point2d(l.Orange.Img[0], l.Orange.Img[1]));
-                    t.Locate(mm, l, frame.Height / 1080.0);
+                    t.Locate(mm, l, Regions.Ui(frame.Width, frame.Height));
                     scores.Add($"{l.Number}:{t.LastScore:0.00}");
                 }
                 report.AppendLine("  guess: " + string.Join(" ", scores));
@@ -100,7 +100,7 @@ public static class Analyzer
             {
                 var it = new IslandTracker(arts);
                 sw.Restart();
-                var ip = it.Locate(mm, isl, frame.Height / 1080.0, true);
+                var ip = it.Locate(mm, isl, Regions.Ui(frame.Width, frame.Height), true);
                 report.AppendLine($"  island ({sw.ElapsedMilliseconds} ms): {(ip == null ? "none" : $"({ip.Value.X:0},{ip.Value.Y:0})")} | {it.LastInfo}");
                 if (ip is Point2d ipp)
                     foreach (var ms2 in new[] { "Corner" })
@@ -132,10 +132,10 @@ public static class Analyzer
                 pc[new Rect(0, 0, dst.Width, dst.Height)].CopyTo(vis[dst]);
             }
             Cv2.ImWrite(Path.Combine(outDir, Path.GetFileNameWithoutExtension(file) + "_analysis.jpg"), vis);
-            double? hd = new HeadingDetector(Path.Combine(db.Root, "icons", "player_arrow.png")).Detect(mm, frame.Height / 1080.0);
-            double? cam = HeadingDetector.FromViewCone(mm, frame.Height / 1080.0, out double camConf) is double cv && camConf >= 0.2 ? cv : null;
+            double? hd = new HeadingDetector(Path.Combine(db.Root, "icons", "player_arrow.png")).Detect(mm, Regions.Ui(frame.Width, frame.Height));
+            double? cam = HeadingDetector.FromViewCone(mm, Regions.Ui(frame.Width, frame.Height), out double camConf) is double cv && camConf >= 0.2 ? cv : null;
             report.AppendLine($"  heading: {(hd == null ? "none" : $"{hd:0} deg")}, camera (view cone): {(cam == null ? "none" : $"{cam:0} deg")} ({camConf:0.00})");
-            double eggScore = HeadingDetector.EggScore(mm, frame.Height / 1080.0, Path.Combine(db.Root, "icons"));
+            double eggScore = HeadingDetector.EggScore(mm, Regions.Ui(frame.Width, frame.Height), Path.Combine(db.Root, "icons"));
             bool egg = (hd == null && eggScore >= 0.5) || Environment.GetEnvironmentVariable("SH_FORCE_EGG") == "1"; // (forcing: preview only)
             HeadingFeed.Publish(hd, cam, egg);
             report.AppendLine($"  egg form: {(egg ? "yes" : "no")} ({eggScore:0.00})");
@@ -189,7 +189,7 @@ public static class Analyzer
     static void RenderOverlay(string shot, string outPath, LayoutDb db, Settings settings, OverlayFrame f, bool placing = false)
     {
         var bg = new System.Windows.Media.Imaging.BitmapImage(new Uri(Path.GetFullPath(shot)));
-        var view = new OverlayView(db, settings) { Preview = true, PreviewUi = f.Client.Height / 1080.0, Frame = f, Placing = placing, PlacementClient = f.Client };
+        var view = new OverlayView(db, settings) { Preview = true, PreviewUi = Regions.Ui(f.Client.Width, f.Client.Height), Frame = f, Placing = placing, PlacementClient = f.Client };
         var size = new System.Windows.Size(f.Client.Width, f.Client.Height);
         view.Measure(size); view.Arrange(new System.Windows.Rect(size));
         var dv = new System.Windows.Media.DrawingVisual();

@@ -46,6 +46,8 @@ internal static class Native
     public const uint PW_CLIENTONLY = 0x1, PW_RENDERFULLCONTENT = 0x2;
     public const uint WDA_NONE = 0x0;
     [DllImport("gdi32.dll")] public static extern int GetDIBits(IntPtr hdc, IntPtr bmp, uint start, uint lines, IntPtr bits, ref BITMAPINFOHEADER bmi, uint usage);
+    [DllImport("gdi32.dll")] public static extern IntPtr CreateDIBSection(IntPtr hdc, ref BITMAPINFOHEADER bmi, uint usage, out IntPtr bits, IntPtr section, uint offset);
+    [DllImport("gdi32.dll")] public static extern bool GdiFlush();
 
     [StructLayout(LayoutKind.Sequential)]
     public struct BITMAPINFOHEADER

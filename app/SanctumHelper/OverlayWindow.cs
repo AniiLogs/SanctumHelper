@@ -19,6 +19,7 @@ public sealed class OverlayWindow : Window
     IntPtr hwnd;
     bool forceExclude;
     OpenCvSharp.Rect placed;
+    long lastTopmost;
     OverlayFrame? live;
 
     public OverlayWindow(LayoutDb db, Settings settings)
@@ -75,7 +76,7 @@ public sealed class OverlayWindow : Window
         if (f.Visible && f.Mini && !f.Big && f.Layout != null && f.Client.Width > 0
             && view.MiniStyle(f, f.Layout) is string st && st is "Corner" or "Disc" or "Radar" or "Compass")
         {
-            double ui = f.Client.Height / 1080.0, m = 70 * ui; // room for labels, rim arrows, the legend
+            double ui = Regions.Ui(f.Client.Width, f.Client.Height), m = 70 * ui; // room for labels, rim arrows, the legend
             var r = view.MiniPanel(st, f.Client.Width, f.Client.Height, ui);
             r = new Rect(r.X - m, r.Y - m, r.Width + 2 * m, r.Height + 2 * m);
             r.Intersect(new Rect(0, 0, f.Client.Width, f.Client.Height));
@@ -93,9 +94,11 @@ public sealed class OverlayWindow : Window
             Native.SetWindowPos(hwnd, Native.HWND_TOPMOST, want.X, want.Y, want.Width, want.Height,
                 Native.SWP_NOACTIVATE | Native.SWP_SHOWWINDOW | Native.SWP_NOOWNERZORDER);
         }
-        else if (f.Visible)
+        else if (f.Visible && Environment.TickCount64 - lastTopmost > 250)
         {
-            Native.SetWindowPos(hwnd, Native.HWND_TOPMOST, 0, 0, 0, 0, 0x1 | 0x2 | Native.SWP_NOACTIVATE); // keep on top
+            // Keep on top; a few times a second is plenty (frames now arrive ~40 times a second).
+            lastTopmost = Environment.TickCount64;
+            Native.SetWindowPos(hwnd, Native.HWND_TOPMOST, 0, 0, 0, 0, 0x1 | 0x2 | Native.SWP_NOACTIVATE);
         }
         view.Frame = f;
         view.InvalidateVisual();
@@ -227,7 +230,7 @@ public sealed class OverlayWindow : Window
         if (!dragging) return;
         var p = Phys(e);
         var c = view.PlacementClient;
-        double ui = c.Height / 1080.0;
+        double ui = Regions.Ui(c.Width, c.Height);
         var moved = new Rect(dragStart.X + p.X - dragFrom.X, dragStart.Y + p.Y - dragFrom.Y, dragStart.Width, dragStart.Height);
         var fit = OverlayView.Fit(moved, c.Width, c.Height, ui);
         settings.MiniMapX = (fit.X + fit.Width / 2) / c.Width;
@@ -264,7 +267,12 @@ public sealed class OverlayView : FrameworkElement
     readonly Settings settings;
     readonly Dictionary<(int, int), BitmapSource> images = new();
     readonly Dictionary<(int, int), BitmapSource> outlines = new();
-    public OverlayFrame? Frame { get; set; }
+    OverlayFrame? frame;
+    public OverlayFrame? Frame
+    {
+        get => frame;
+        set { frame = value; Animating = !Preview && value is { Mini: true, Visible: true, Player: not null }; }
+    }
     /// <summary>Drawn inside the settings window: no DPI undo, no "not lined up" hint.</summary>
     public bool Preview { get; set; }
     /// <summary>UI scale used in preview mode (the live overlay follows the game's height).</summary>
@@ -297,7 +305,21 @@ public sealed class OverlayView : FrameworkElement
         this.db = db;
         this.settings = settings;
         IsHitTestVisible = false;
-        CompositionTarget.Rendering += Animate;
+    }
+
+    // Hooked to the display's frame clock only while an on-screen map is up. (It was hooked for good in the
+    // constructor: WPF then renders every display frame even with nothing shown, and every view made for the
+    // aLogs layout browser stayed alive through the hook, each holding its decoded map: ~22 MB per layout viewed.)
+    bool animating;
+    bool Animating
+    {
+        set
+        {
+            if (value == animating) return;
+            animating = value;
+            if (value) { lastTick = DateTime.UtcNow; CompositionTarget.Rendering += Animate; }
+            else { CompositionTarget.Rendering -= Animate; shown = null; shownHeading = shownCamera = null; }
+        }
     }
 
     // The on-screen map glides toward each new position instead of jumping between fixes.
@@ -326,7 +348,9 @@ public sealed class OverlayView : FrameworkElement
         if (Frame is not { Mini: true, Visible: true, Player: OpenCvSharp.Point2d fix } fr) { shown = null; shownHeading = shownCamera = null; return; }
         var (liveHeading, liveCamera, liveStamp) = HeadingFeed.Get();
         bool live = (now - liveStamp).TotalSeconds < 1.5;
-        double ta = 1 - Math.Exp(-dt / 0.035); // ~35 ms: keeps up with a fast camera turn
+        // ~15 ms (was 35): readings now come ~60 a second already smoothed, so this only bridges
+        // display frames; 35 ms trailed a fast camera turn by ~12 degrees on its own.
+        double ta = 1 - Math.Exp(-dt / 0.015);
         bool turned = Turn(ref shownHeading, live ? liveHeading : fr.Heading, ta);
         turned |= Turn(ref shownCamera, live ? liveCamera : fr.Camera, ta);
         if (turned) InvalidateVisual();
@@ -345,7 +369,9 @@ public sealed class OverlayView : FrameworkElement
             return;
         }
         if (Math.Abs(cur.X - target.X) + Math.Abs(cur.Y - target.Y) < 0.3) return;
-        double a = 1 - Math.Exp(-dt / 0.07); // ~70 ms: smooths ticks and small corrections, the tracker already filters
+        // ~35 ms (was 70): smooths ticks and small corrections, the tracker already filters. Fixes come
+        // ~40 a second now (were ~20), so less is needed; 70 ms trailed a walking player by 70 ms.
+        double a = 1 - Math.Exp(-dt / 0.035);
         shown = new OpenCvSharp.Point2d(cur.X + (target.X - cur.X) * a, cur.Y + (target.Y - cur.Y) * a);
         InvalidateVisual();
     }
@@ -371,6 +397,7 @@ public sealed class OverlayView : FrameworkElement
             bi.CacheOption = BitmapCacheOption.OnLoad;
             bi.EndInit();
             bi.Freeze();
+            Forget(images, l);
             images[(l.Number, floor)] = bmp = bi;
         }
         return bmp;
@@ -403,7 +430,16 @@ public sealed class OverlayView : FrameworkElement
         System.Runtime.InteropServices.Marshal.Copy(outM.Data, bytes, 0, bytes.Length);
         bmp = BitmapSource.Create(outM.Width, outM.Height, 96, 96, PixelFormats.Pbgra32, null, bytes, outM.Width * 4);
         bmp.Freeze();
+        Forget(outlines, l);
         return outlines[(l.Number, level)] = bmp;
+    }
+
+    /// <summary>Drops the decoded images of other layouts (each map is ~16-22 MB decoded; they used to pile up run
+    /// after run). The island's stay: the player goes back and forth between it and the Sanctum.</summary>
+    void Forget(Dictionary<(int, int), BitmapSource> cache, Layout keep)
+    {
+        int island = db.Island?.Number ?? int.MinValue;
+        foreach (var k in cache.Keys.Where(k => k.Item1 != keep.Number && k.Item1 != island).ToList()) cache.Remove(k);
     }
 
     public static readonly PerfStat Perf = new();
@@ -428,7 +464,7 @@ public sealed class OverlayView : FrameworkElement
         var dpi = VisualTreeHelper.GetDpi(this);
         dc.PushTransform(Preview ? Transform.Identity : new ScaleTransform(1 / dpi.DpiScaleX, 1 / dpi.DpiScaleY));
         dc.PushTransform(Placing || Preview ? Transform.Identity : new TranslateTransform(-Offset.X, -Offset.Y));
-        double ui = Preview && !f.Mini ? PreviewUi : f.Client.Height / 1080.0; // UI scale, matching the game's
+        double ui = Preview && !f.Mini ? PreviewUi : Regions.Ui(f.Client.Width, f.Client.Height); // UI scale, matching the game's
         double ms = settings.MarkerScale * ui;
         if (f.Mini && f.Layout != null && f.Player is OpenCvSharp.Point2d me)
         {
@@ -541,7 +577,10 @@ public sealed class OverlayView : FrameworkElement
         else if (style == "Compass") c = new Point(clientW / 2, 96 * ui);
         else
         {
-            double x = settings.MiniMapCorner == "TopCenter" ? (clientW - sz.Width) / 2 : clientW - sz.Width - 240 * ui;
+            // Clear of the party portraits at the right edge of the game's UI area (not the window's: on 21:9 the
+            // UI is a centred 16:9 box).
+            var hud = Regions.Hud((int)clientW, (int)clientH);
+            double x = settings.MiniMapCorner == "TopCenter" ? (clientW - sz.Width) / 2 : hud.Right - sz.Width - 240 * ui;
             c = new Point(x + sz.Width / 2, 105 * ui + sz.Height / 2);
         }
         return Fit(new Rect(c.X - sz.Width / 2, c.Y - sz.Height / 2, sz.Width, sz.Height), clientW, clientH, ui);
@@ -558,7 +597,8 @@ public sealed class OverlayView : FrameworkElement
         if (clientW - m - (x + r.Width) < snap) x = clientW - m - r.Width;
         if (y - m < snap) y = m;
         if (clientH - m - (y + r.Height) < snap) y = clientH - m - r.Height;
-        var hud = new Rect(0, 0, 300 * ui, 260 * ui);
+        // The game's minimap and quest text, at the left of its UI area.
+        var hud = new Rect(Regions.Hud((int)clientW, (int)clientH).X, 0, 300 * ui, 260 * ui);
         if (new Rect(x, y, r.Width, r.Height).IntersectsWith(hud))
         {
             double right = hud.Right + m - x, down = hud.Bottom + m - y;

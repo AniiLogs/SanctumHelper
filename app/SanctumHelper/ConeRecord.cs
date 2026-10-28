@@ -14,6 +14,8 @@ static class ConeRecord
 {
     public static void Record(string dir, double seconds)
     {
+        // At most 10 minutes (~18,000 minimap frames, ~1-2 GB): a mistyped length can't fill the disk.
+        seconds = Math.Clamp(seconds, 0, 600);
         Directory.CreateDirectory(dir);
         var settings = Settings.Load();
         var game = new GameWindow();

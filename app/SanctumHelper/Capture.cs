@@ -57,64 +57,63 @@ public static class ScreenGrabber
     {
         // The aLogs app's shared frame when it's running, so the window is copied once for all tools.
         if (SharedCapture.TryGrab(hwnd, clientW, clientH, sub) is { } shared) return shared;
-        IntPtr screen = Native.GetDC(IntPtr.Zero);
-        IntPtr mem = Native.CreateCompatibleDC(screen);
-        IntPtr bmp = Native.CreateCompatibleBitmap(screen, clientW, clientH);
-        IntPtr old = Native.SelectObject(mem, bmp);
-        try
-        {
-            if (!Native.PrintWindow(hwnd, mem, Native.PW_CLIENTONLY | Native.PW_RENDERFULLCONTENT)) return null;
-            Native.SelectObject(mem, old);
-            using var full = new Mat(clientH, clientW, MatType.CV_8UC4);
-            var bi = new Native.BITMAPINFOHEADER
-            {
-                biSize = (uint)Marshal.SizeOf<Native.BITMAPINFOHEADER>(),
-                biWidth = clientW, biHeight = -clientH, biPlanes = 1, biBitCount = 32,
-            };
-            Native.GetDIBits(mem, bmp, 0, (uint)clientH, full.Data, ref bi, 0);
-            sub = sub.Intersect(new Rect(0, 0, clientW, clientH));
-            using var part = new Mat(full, sub);
-            var bgr = new Mat();
-            Cv2.CvtColor(part, bgr, ColorConversionCodes.BGRA2BGR);
-            // A window that can't be printed comes back black.
-            if (Cv2.CountNonZero(bgr.Reshape(1)) == 0) { bgr.Dispose(); return null; }
-            return bgr;
-        }
-        finally
-        {
-            Native.DeleteObject(bmp);
-            Native.DeleteDC(mem);
-            Native.ReleaseDC(IntPtr.Zero, screen);
-        }
+        sub = sub.Intersect(new Rect(0, 0, clientW, clientH));
+        if (sub.Width <= 0 || sub.Height <= 0) return null;
+        // PrintWindow draws the whole client area: into a DIB section, whose pixels are read in place, and only the
+        // part asked for is converted. (It went into a device bitmap that was then copied whole into a second buffer:
+        // two 33 MB copies per 4K frame even when only the 400x200 title corner or the party screen's top band was wanted.)
+        using var dib = new Dib(clientW, clientH);
+        if (!Native.PrintWindow(hwnd, dib.Dc, Native.PW_CLIENTONLY | Native.PW_RENDERFULLCONTENT)) return null;
+        Native.GdiFlush();
+        using var full = Mat.FromPixelData(clientH, clientW, MatType.CV_8UC4, dib.Bits, clientW * 4L);
+        using var part = new Mat(full, sub);
+        var bgr = new Mat();
+        Cv2.CvtColor(part, bgr, ColorConversionCodes.BGRA2BGR);
+        // A window that can't be printed comes back black.
+        using (var flat = bgr.Reshape(1))
+            if (Cv2.CountNonZero(flat) == 0) { bgr.Dispose(); return null; }
+        return bgr;
     }
 
     public static Mat Grab(Rect r)
     {
+        // Straight into a DIB section and converted from there (was a device bitmap copied out with GetDIBits into
+        // a second buffer first).
+        using var dib = new Dib(r.Width, r.Height);
         IntPtr screen = Native.GetDC(IntPtr.Zero);
-        IntPtr mem = Native.CreateCompatibleDC(screen);
-        IntPtr bmp = Native.CreateCompatibleBitmap(screen, r.Width, r.Height);
-        IntPtr old = Native.SelectObject(mem, bmp);
-        try
+        try { Native.BitBlt(dib.Dc, 0, 0, r.Width, r.Height, screen, r.X, r.Y, Native.SRCCOPY); }
+        finally { Native.ReleaseDC(IntPtr.Zero, screen); }
+        Native.GdiFlush();
+        using var bgra = Mat.FromPixelData(r.Height, r.Width, MatType.CV_8UC4, dib.Bits, r.Width * 4L);
+        var bgr = new Mat();
+        Cv2.CvtColor(bgra, bgr, ColorConversionCodes.BGRA2BGR);
+        return bgr;
+    }
+
+    /// <summary>A top-down 32-bit DIB section selected into a memory DC; all of it is released on Dispose.</summary>
+    sealed class Dib : IDisposable
+    {
+        public readonly IntPtr Dc, Bits;
+        readonly IntPtr bmp, old;
+
+        public Dib(int w, int h)
         {
-            Native.BitBlt(mem, 0, 0, r.Width, r.Height, screen, r.X, r.Y, Native.SRCCOPY);
-            var bgra = new Mat(r.Height, r.Width, MatType.CV_8UC4);
             var bi = new Native.BITMAPINFOHEADER
             {
                 biSize = (uint)Marshal.SizeOf<Native.BITMAPINFOHEADER>(),
-                biWidth = r.Width, biHeight = -r.Height, biPlanes = 1, biBitCount = 32,
+                biWidth = w, biHeight = -h, biPlanes = 1, biBitCount = 32,
             };
-            Native.SelectObject(mem, old);
-            Native.GetDIBits(mem, bmp, 0, (uint)r.Height, bgra.Data, ref bi, 0);
-            var bgr = new Mat();
-            Cv2.CvtColor(bgra, bgr, ColorConversionCodes.BGRA2BGR);
-            bgra.Dispose();
-            return bgr;
+            Dc = Native.CreateCompatibleDC(IntPtr.Zero);
+            bmp = Native.CreateDIBSection(Dc, ref bi, 0, out Bits, IntPtr.Zero, 0);
+            if (bmp == IntPtr.Zero || Bits == IntPtr.Zero) { Native.DeleteDC(Dc); throw new InvalidOperationException($"no {w}x{h} bitmap"); }
+            old = Native.SelectObject(Dc, bmp);
         }
-        finally
+
+        public void Dispose()
         {
+            Native.SelectObject(Dc, old);
             Native.DeleteObject(bmp);
-            Native.DeleteDC(mem);
-            Native.ReleaseDC(IntPtr.Zero, screen);
+            Native.DeleteDC(Dc);
         }
     }
 }

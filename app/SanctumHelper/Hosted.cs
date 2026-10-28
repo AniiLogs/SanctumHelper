@@ -255,7 +255,12 @@ public sealed class Hosted
         {
             var path = Path.Combine(Dir, name);
             File.WriteAllText(path + ".tmp", JsonSerializer.Serialize(value, Json));
-            File.Move(path + ".tmp", path, true);
+            // The app may be reading the file at that moment ("Access to the path is denied"): try again shortly.
+            for (int attempt = 1; ; attempt++)
+            {
+                try { File.Move(path + ".tmp", path, true); return; }
+                catch (Exception) when (attempt < 5) { System.Threading.Thread.Sleep(20); }
+            }
         }
         catch (Exception e) { Log.Write($"hosted {name}: {e.Message}"); }
     }

@@ -9,18 +9,31 @@ public enum Anchor { TopCenter, TopRight, TopLeft }
 
 public static class Regions
 {
+    /// <summary>The game's UI area in a client of any size: a 16:9 box, as tall as the window and centred on wider
+    /// screens (21:9 ultrawide: pillarboxed), as wide as the window and kept to the top on narrower ones (16:10). Its
+    /// height / 1080 is the UI scale (1920x1200 is 1.0, not 1.11; 3440x1440 is 1.33 with the UI starting 440 px in).</summary>
+    public static Rect Hud(int w, int h)
+    {
+        double u = Math.Min(w, h * 16.0 / 9);
+        return new Rect((int)Math.Round((w - u) / 2), 0, (int)Math.Round(u), Math.Min(h, (int)Math.Round(u * 9 / 16)));
+    }
+
+    /// <summary>The game's UI scale: its UI area's height / 1080.</summary>
+    public static double Ui(int w, int h) => Hud(w, h).Height / 1080.0;
+
     /// <summary>Maps a region given in 1920x1080 reference pixels onto a client of any size.
-    /// The game's UI scales with height and stays anchored to its screen edge.</summary>
+    /// The game's UI scales with its UI area (see Hud) and stays anchored to that area's edges.</summary>
     public static Rect ToClient(RegionF r, Anchor a, int w, int h)
     {
-        double s = h / 1080.0;
+        var hud = Hud(w, h);
+        double s = hud.Height / 1080.0;
         double x = a switch
         {
-            Anchor.TopCenter => w / 2.0 + (r.X - 960) * s,
-            Anchor.TopRight => w - (1920 - r.X) * s,
-            _ => r.X * s,
+            Anchor.TopCenter => hud.X + hud.Width / 2.0 + (r.X - 960) * s,
+            Anchor.TopRight => hud.Right - (1920 - r.X) * s,
+            _ => hud.X + r.X * s,
         };
-        var rect = new Rect((int)Math.Round(x), (int)Math.Round(r.Y * s), (int)Math.Round(r.W * s), (int)Math.Round(r.H * s));
+        var rect = new Rect((int)Math.Round(x), (int)Math.Round(hud.Y + r.Y * s), (int)Math.Round(r.W * s), (int)Math.Round(r.H * s));
         return rect.Intersect(new Rect(0, 0, w, h));
     }
 }
@@ -53,6 +66,17 @@ public sealed class DifficultyDetector(OcrService ocr)
         // background behind the banner cannot leak into the OCR.
         using var gray = new Mat();
         Cv2.CvtColor(crop, gray, ColorConversionCodes.BGR2GRAY);
+        // The same picture as last time (a menu or the party screen left open, the game in the background): the
+        // same answer, without running OCR again (one or two OCR passes twice a second, all day while idle).
+        if (lastGray != null && lastGray.Size() == gray.Size())
+        {
+            using var diff = new Mat();
+            Cv2.Absdiff(gray, lastGray, diff);
+            if (Cv2.Mean(diff).Val0 < 1.0) return lastResult;
+        }
+        lastGray?.Dispose();
+        lastGray = gray.Clone();
+        lastResult = null;
         using var bin = new Mat();
         Cv2.Threshold(gray, bin, 150, 255, ThresholdTypes.BinaryInv);
         using var bgr = new Mat();
@@ -60,8 +84,11 @@ public sealed class DifficultyDetector(OcrService ocr)
         var text = ocr.Read(bgr);
         if (string.IsNullOrWhiteSpace(text)) text = ocr.Read(crop);
         LastText = text;
-        return Parse(text, Lang.GameCode);
+        return lastResult = Parse(text, Lang.GameCode);
     }
+
+    Mat? lastGray;
+    string? lastResult;
 
     /// <summary>Accent-, case- and space-free form for comparing OCR text with the game's wording
     /// (OCR spaces out CJK characters and may drop Vietnamese tone marks).</summary>

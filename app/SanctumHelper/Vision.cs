@@ -91,6 +91,9 @@ public sealed class MapArtCache(LayoutDb db)
     /// candidates used to stay loaded for good, ~400 MB after a run. Freed 30 s later, so a frame still being
     /// matched against one isn't cut off; a layout needed again is simply loaded again.</summary>
     public void Trim(Func<int, bool> keep) => Later.Dispose(Later.Take(art, k => keep(k.Item1)));
+
+    /// <summary>How many floor images are loaded.</summary>
+    public int Loaded => art.Count;
 }
 
 /// <summary>Freeing per-layout images. They're OpenCV memory the .NET garbage collector doesn't see, so a cache
@@ -149,10 +152,47 @@ public sealed class ArtFeatureCache(MapArtCache arts)
     {
         foreach (var l in layouts) Get(l);
     }
+
+    /// <summary>Lets go of the features of every layout but the ones kept.</summary>
+    public void Trim(Func<int, bool> keep)
+    {
+        foreach (var k in cache.Keys)
+            if (!keep(k) && cache.TryRemove(k, out var f)) Later.Dispose([f.Desc]);
+    }
 }
 
 public static class Vision
 {
+    const double FltEpsilon = 1.192092896e-07;   // C's FLT_EPSILON (not .NET's float.Epsilon)
+
+    /// <summary>Otsu's threshold from a 256-bin histogram (float counts, as CalcHist gives): the same arithmetic as
+    /// Cv2.Threshold(..., Otsu) does on the pixels themselves, so the same value.</summary>
+    public static double Otsu(Mat hist)
+    {
+        const int N = 256;
+        var h = new double[N];
+        double total = 0;
+        for (int i = 0; i < N; i++) { h[i] = Math.Round(hist.At<float>(i)); total += h[i]; }
+        if (total <= 0) return 0;
+        double mu = 0, scale = 1.0 / total;
+        for (int i = 0; i < N; i++) mu += i * h[i];
+        mu *= scale;
+        double mu1 = 0, q1 = 0, maxSigma = 0, maxVal = 0;
+        for (int i = 0; i < N; i++)
+        {
+            double pi = h[i] * scale;
+            mu1 *= q1;
+            q1 += pi;
+            double q2 = 1.0 - q1;
+            if (Math.Min(q1, q2) < FltEpsilon || Math.Max(q1, q2) > 1.0 - FltEpsilon) continue;
+            mu1 = (mu1 + i * pi) / q1;
+            double mu2 = (mu - q1 * mu1) / q2;
+            double sigma = q1 * q2 * (mu1 - mu2) * (mu1 - mu2);
+            if (sigma > maxSigma) { maxSigma = sigma; maxVal = i; }
+        }
+        return maxVal;
+    }
+
     public static Mat Clahe(Mat gray)
     {
         using var c = Cv2.CreateCLAHE(2.0, new Size(8, 8));
@@ -184,6 +224,173 @@ public static class Vision
             RobustEstimationAlgorithms.RANSAC, reproj, 3000, 0.995, 10);
         if (M == null || M.Empty()) return null;
         return (M.At<double>(0, 0), M.At<double>(1, 0), M.At<double>(0, 2), M.At<double>(1, 2), Cv2.CountNonZero(inl), src.Count);
+    }
+}
+
+/// <summary>An image ready to be matched against MaskedTemplates: its channels and the sum of their squares in the
+/// frequency domain, worked out once for every template tried on it (the arrow reader tries 11-34 per frame).</summary>
+public sealed class MatchImage : IDisposable
+{
+    internal readonly Size Dft;
+    internal readonly int Width, Height, Channels;
+    internal readonly Mat[] Spectra;
+    internal readonly Mat SquareSpectrum;
+    internal readonly Mat Source;
+
+    public MatchImage(Mat image)
+    {
+        Source = image;
+        Width = image.Width; Height = image.Height; Channels = image.Channels();
+        Dft = new Size(Cv2.GetOptimalDFTSize(Width), Cv2.GetOptimalDFTSize(Height));
+        using var f = MaskedTemplate.ToFloat(image);
+        var ch = f.Split();
+        Spectra = new Mat[Channels];
+        using var sq = new Mat(Height, Width, MatType.CV_32F, Scalar.All(0));
+        using var tmp = new Mat();
+        for (int c = 0; c < Channels; c++)
+        {
+            Spectra[c] = MaskedTemplate.Forward(ch[c], Dft);
+            Cv2.Multiply(ch[c], ch[c], tmp);
+            Cv2.Add(sq, tmp, sq);
+            ch[c].Dispose();
+        }
+        SquareSpectrum = MaskedTemplate.Forward(sq, Dft);
+    }
+
+    public void Dispose()
+    {
+        foreach (var m in Spectra) m.Dispose();
+        SquareSpectrum.Dispose();
+    }
+}
+
+/// <summary>Cv2.MatchTemplate(image, template, result, CCoeffNormed, mask) with a binary mask, made from plain
+/// cross-correlations in the frequency domain (the same sums OpenCV's masked match computes, channels summed). The
+/// template side is transformed once and kept for every image it is matched against (the floor fit matches one
+/// template against ~12-24 zooms, the minimap tracker against each floor), and an image once for every template (see
+/// MatchImage). Measured 1.3-3x faster than the masked Cv2.MatchTemplate on this app's sizes, with the same best
+/// locations and scores within 1e-5. Flat windows (zero variance) give NaN, as there.</summary>
+public sealed class MaskedTemplate : IDisposable
+{
+    readonly Mat[] templ;                      // per channel: templ - its masked mean, times the mask
+    readonly Mat mask;                         // 0/1 floats
+    readonly double maskSum, templNorm;
+    readonly Dictionary<Size, (Mat[] t, Mat m)> spectra = new();
+    readonly Mat srcTempl, srcMask;            // the caller's, kept alive by the caller while matching
+    public int Width => mask.Width;
+    public int Height => mask.Height;
+    /// <summary>Use Cv2.MatchTemplate itself (for comparing the two on the developer bench).</summary>
+    public static bool Reference { get; set; }
+
+    /// <param name="templ">Any number of channels, 8-bit or float.</param>
+    /// <param name="mask8u">Binary, one channel.</param>
+    public MaskedTemplate(Mat templ, Mat mask8u)
+    {
+        srcTempl = templ; srcMask = mask8u;
+        mask = new Mat();
+        mask8u.ConvertTo(mask, MatType.CV_32F, 1 / 255.0);
+        Cv2.Threshold(mask, mask, 0, 1, ThresholdTypes.Binary);
+        maskSum = Math.Max(1e-9, Cv2.Sum(mask).Val0);
+        using var f = ToFloat(templ);
+        var ch = f.Split();
+        this.templ = new Mat[ch.Length];
+        for (int c = 0; c < ch.Length; c++)
+        {
+            var t = new Mat();
+            Cv2.Multiply(ch[c], mask, t);
+            double mean = Cv2.Sum(t).Val0 / maskSum;
+            Cv2.Subtract(ch[c], new Scalar(mean), t);
+            Cv2.Multiply(t, mask, t);
+            templNorm += t.Dot(t);
+            this.templ[c] = t;
+            ch[c].Dispose();
+        }
+    }
+
+    /// <summary>8-bit images as floats scaled to 0-1 (as OpenCV's masked match does); floats as they are.</summary>
+    internal static Mat ToFloat(Mat m)
+    {
+        var f = new Mat();
+        if (m.Depth() == MatType.CV_32F) m.CopyTo(f);
+        else m.ConvertTo(f, MatType.CV_32FC(m.Channels()), 1 / 255.0);
+        return f;
+    }
+
+    /// <summary>The (packed, real) DFT of a one-channel float image, zero-padded to `dft`.</summary>
+    internal static Mat Forward(Mat src, Size dft)
+    {
+        using var pad = new Mat(dft, MatType.CV_32F, Scalar.All(0));
+        using (var part = new Mat(pad, new Rect(0, 0, src.Width, src.Height))) src.CopyTo(part);
+        var f = new Mat();
+        Cv2.Dft(pad, f, DftFlags.None, src.Height);
+        return f;
+    }
+
+    (Mat[] t, Mat m) Spectra(Size dft)
+    {
+        if (spectra.TryGetValue(dft, out var s)) return s;
+        var t = new Mat[templ.Length];
+        for (int c = 0; c < templ.Length; c++) t[c] = Forward(templ[c], dft);
+        return spectra[dft] = (t, Forward(mask, dft));
+    }
+
+    /// <summary>The CCoeffNormed map of the template over an image (as with a mask in Cv2.MatchTemplate).</summary>
+    public void Match(Mat image, Mat result)
+    {
+        if (Reference) { Cv2.MatchTemplate(image, srcTempl, result, TemplateMatchModes.CCoeffNormed, srcMask); return; }
+        using var mi = new MatchImage(image);
+        Match(mi, result);
+    }
+
+    public void Match(MatchImage image, Mat result)
+    {
+        int rw = image.Width - Width + 1, rh = image.Height - Height + 1;
+        if (rw <= 0 || rh <= 0) { result.Create(new Size(0, 0), MatType.CV_32F); return; }
+        if (Reference) { Cv2.MatchTemplate(image.Source, srcTempl, result, TemplateMatchModes.CCoeffNormed, srcMask); return; }
+        var (ts, ms) = Spectra(image.Dft);
+        using var prod = new Mat();
+        using var acc = new Mat();
+        using var back = new Mat();
+        Mat Back(Mat spectrum)
+        {
+            Cv2.Dft(spectrum, back, DftFlags.Inverse | DftFlags.Scale | DftFlags.RealOutput, rh);
+            using var valid = new Mat(back, new Rect(0, 0, rw, rh));
+            return valid.Clone();
+        }
+        // Sums over each window of image * templ (all channels: added up before going back), of image * mask
+        // (squared per channel), of image^2 * mask.
+        for (int c = 0; c < image.Channels; c++)
+        {
+            Cv2.MulSpectrums(image.Spectra[c], ts[c], prod, DftFlags.None, conjB: true);
+            if (c == 0) prod.CopyTo(acc); else Cv2.Add(acc, prod, acc);
+        }
+        using var num = Back(acc);
+        using var sum2 = new Mat(rh, rw, MatType.CV_32F, Scalar.All(0));
+        for (int c = 0; c < image.Channels; c++)
+        {
+            Cv2.MulSpectrums(image.Spectra[c], ms, prod, DftFlags.None, conjB: true);
+            using var sum = Back(prod);
+            Cv2.Multiply(sum, sum, sum);
+            Cv2.Add(sum2, sum, sum2);
+        }
+        Cv2.MulSpectrums(image.SquareSpectrum, ms, prod, DftFlags.None, conjB: true);
+        using var sq = Back(prod);
+        // num / sqrt((sq - sum^2 / n) * |templ|^2)
+        Cv2.AddWeighted(sq, templNorm, sum2, -templNorm / maskSum, 0, sq);
+        Cv2.Max(sq, new Scalar(0), sq);
+        Cv2.Sqrt(sq, sq);
+        Cv2.Divide(num, sq, result);
+        using var flat = new Mat();
+        Cv2.Compare(sq, new Scalar(0), flat, CmpType.LE);
+        result.SetTo(new Scalar(float.NaN), flat);
+    }
+
+    public void Dispose()
+    {
+        foreach (var t in templ) t.Dispose();
+        mask.Dispose();
+        foreach (var (t, m) in spectra.Values) { foreach (var x in t) x.Dispose(); m.Dispose(); }
+        spectra.Clear();
     }
 }
 
@@ -255,7 +462,7 @@ public sealed class MinimapTracker(MapArtCache arts)
     int pendingFloor, floorVotes;
     double? scale;
     Point2d? last, jumpCandidate;
-    DateTime lastOk, seededAt;
+    DateTime lastOk, seededAt, otherFloorsAt, floorVoteSince, jumpSince;
     public double LastScore { get; private set; }
     public string LastInfo { get; private set; } = "";
     /// <summary>Where the filter has the player now (map-art px), or null when lost.</summary>
@@ -328,14 +535,15 @@ public sealed class MinimapTracker(MapArtCache arts)
         Cv2.InRange(hsv, new Scalar(0, 0, 0), new Scalar(180, 40, 255), grey);
         Cv2.BitwiseAnd(grey, disc, grey);
         var hsvCh = hsv.Split();
-        var greyIdx = new List<byte>();
-        using (var idx = new Mat()) { Cv2.FindNonZero(grey, idx); for (int i = 0; i < idx.Rows; i++) { var pt = idx.At<Point>(i); greyIdx.Add(hsvCh[2].At<byte>(pt.Y, pt.X)); } }
+        // Otsu over the grey pixels' brightness, from their histogram (was a list built pixel by pixel through
+        // At<>, then thresholded: same cut, measured identical on every value histogram tried).
         double cut = 131;
-        if (greyIdx.Count > 50)
+        int greyN = Cv2.CountNonZero(grey);
+        if (greyN > 50)
         {
-            using var row = Mat.FromPixelData(1, greyIdx.Count, MatType.CV_8U, greyIdx.ToArray());
-            using var tmp = new Mat();
-            cut = Math.Max(70, Cv2.Threshold(row, tmp, 0, 255, ThresholdTypes.Binary | ThresholdTypes.Otsu));
+            using var hist = new Mat();
+            Cv2.CalcHist([hsvCh[2]], [0], grey, hist, 1, [256], [new Rangef(0, 256)]);
+            cut = Math.Max(70, Vision.Otsu(hist));
         }
         using var floor8 = new Mat();
         Cv2.InRange(hsv, new Scalar(0, 0, cut + 1), new Scalar(180, 40, 255), floor8);
@@ -350,9 +558,7 @@ public sealed class MinimapTracker(MapArtCache arts)
         using (var sq = new Mat())
         using (var flat = new Mat())
         {
-            var hc = hsv.Split();
-            hc[2].ConvertTo(v, MatType.CV_32F);
-            foreach (var ch in hc) ch.Dispose();
+            hsvCh[2].ConvertTo(v, MatType.CV_32F);
             // Window sizes are in search-resolution px (Work 0.5) and scale with Work, so tracking
             // at full resolution judges the same physical area as the search did.
             int fw = Math.Max(3, (int)Math.Round(8 * Work));
@@ -387,6 +593,7 @@ public sealed class MinimapTracker(MapArtCache arts)
         Cv2.BitwiseAnd(mask, disc, mask);
         using var tpl = new Mat();
         floor8.ConvertTo(tpl, MatType.CV_32F, 1 / 255.0);
+        using var match = new MaskedTemplate(tpl, mask);
 
         double[] scales = scale is double known && tracking ? [known] : SearchScales;
         (Point2d p, double score, double second, double s, int fl)? best = null;
@@ -394,9 +601,14 @@ public sealed class MinimapTracker(MapArtCache arts)
         // Upstairs the minimap shows the upper-floor drawing, so every floor is tried; the
         // current one first and with a small bonus so a tie doesn't flip floors.
         int floors = LayoutDb.FloorCount(layout);
+        // Each floor is a full match (~8 ms, most of a fix's cost, measured): while the current floor
+        // matches well, the others are only tried every 45 ms, about as often as fixes used to come.
+        bool allFloors = true;
+        bool othersDue = (DateTime.UtcNow - otherFloorsAt).TotalSeconds >= 0.045;
         foreach (var fl in Enumerable.Range(0, floors).OrderBy(x => x == Floor ? 0 : 1))
         foreach (var s in scales)
         {
+            if (fl != Floor && tracking && !othersDue && best is { } cur && cur.fl == Floor && cur.score >= 0.6) { allFloors = false; continue; }
             var map = ArtFloor(layout, fl, s, Work);
             double kk = s * Work; // art px -> work px
             var roi = new Rect(0, 0, map.Width, map.Height);
@@ -411,7 +623,7 @@ public sealed class MinimapTracker(MapArtCache arts)
             if (roi.Width <= tpl.Width || roi.Height <= tpl.Height) continue;
             using var sub = new Mat(map, roi);
             using var res = new Mat();
-            Cv2.MatchTemplate(sub, tpl, res, TemplateMatchModes.CCoeffNormed, mask);
+            match.Match(sub, res);
             // Flat windows divide by ~0 and give NaN/±Inf: treat them as no match.
             Cv2.PatchNaNs(res, -1);
             Cv2.Threshold(res, res, 1.0, 0, ThresholdTypes.TozeroInv);
@@ -437,23 +649,26 @@ public sealed class MinimapTracker(MapArtCache arts)
             if (best == null || max + bonus > best.Value.score + (best.Value.fl == Floor ? 0.03 : 0))
                 best = cand;
         }
+        if (allFloors) otherFloorsAt = DateTime.UtcNow;
         if (best == null) return null;
-        // Changing floors needs three fixes in a row that prefer the other floor; until then
-        // stay on the current one (stairs and doorways briefly look like both).
+        // Changing floors needs three fixes in a row that prefer the other floor, over at least
+        // 90 ms (they came ~50 ms apart before fixes got faster); until then stay on the current
+        // one (stairs and doorways briefly look like both).
         if (best.Value.fl != Floor && perFloor.ContainsKey(Floor))
         {
+            if (pendingFloor != best.Value.fl || floorVotes == 0) floorVoteSince = DateTime.UtcNow;
             floorVotes = pendingFloor == best.Value.fl ? floorVotes + 1 : 1;
             pendingFloor = best.Value.fl;
-            if (floorVotes < 3) best = perFloor[Floor];
+            if (floorVotes < 3 || (DateTime.UtcNow - floorVoteSince).TotalSeconds < 0.09) best = perFloor[Floor];
         }
-        else floorVotes = 0;
+        else if (allFloors) floorVotes = 0;   // (a fix that didn't look at the other floors says nothing)
         var b = best.Value;
         LastScore = b.score;
         LastInfo = $"minimap {b.score:0.00} (2nd {b.second:0.00}) at ({b.p.X:0},{b.p.Y:0}) s{b.s:0.00} level {b.fl} floor {floorPx}";
         // Right after a good fix a modest score is fine (the window is small); once lost, the
         // window is wide and look-alike spots appear, so ask for more.
         var now = DateTime.UtcNow;
-        double dt = Math.Clamp((now - filterTime).TotalSeconds, 0.02, 0.5);
+        double dt = Math.Clamp((now - filterTime).TotalSeconds, 0.005, 0.5);   // (fixes can come 25 ms apart now)
         bool recent = (now - lastOk).TotalSeconds < 1.0;
         var pred = last is Point2d lp0 ? new Point2d(lp0.X + vel.X * dt, lp0.Y + vel.Y * dt) : b.p;
         // In tight corridors little floor is visible and scores drop; a fix right where the
@@ -485,13 +700,16 @@ public sealed class MinimapTracker(MapArtCache arts)
             if (tracking && (now - seededAt).TotalSeconds > 60 && (now - lastOk).TotalSeconds > 60) last = null;
             return null;
         }
-        // Gate: a fix far from where we expect the player needs a second fix agreeing with it.
+        // Gate: a fix far from where we expect the player needs a later fix agreeing with it, at
+        // least 30 ms on (two frames in a row are nearly the same picture, so they'd agree on a
+        // look-alike as easily; fixes used to come ~50 ms apart).
         double miss = Math.Abs(b.p.X - pred.X) + Math.Abs(b.p.Y - pred.Y);
         if (tracking && recent && miss > 60)
         {
             bool agrees = jumpCandidate is Point2d jc && Math.Abs(jc.X - b.p.X) + Math.Abs(jc.Y - b.p.Y) < 40;
+            if (!agrees) jumpSince = now;
             jumpCandidate = b.p;
-            if (!agrees) { LastInfo += " (jump, waiting for confirmation)"; return pred; }
+            if (!agrees || (now - jumpSince).TotalSeconds < 0.03) { LastInfo += " (jump, waiting for confirmation)"; return pred; }
             vel = default; last = b.p; // confirmed (dash, teleport): snap
         }
         else if (!tracking || !recent)
@@ -524,22 +742,19 @@ public sealed class DoorLocator(MapArtCache arts, Mat? header, Mat? orangeIcon =
     /// <summary>Finds a door icon by matching the icon as the game draws it (cropped from 1080p
     /// screenshots). Colour blobs alone confuse the blue door with the light-blue egg and
     /// intrigue marks. Real doors score 0.84-1.0 (even half covered), anything else < 0.6.</summary>
-    static Point2d? FindIcon(Mat frame1080, Mat? icon, Rect exclude, out double score)
+    /// <param name="half">The frame at half the 1080p-equivalent size; tpl the icon at that size.</param>
+    /// <param name="hx">Where the game's UI area starts (1080p px; > 0 on ultrawide screens).</param>
+    static Point2d? FindIcon(Mat half, Mat? tpl, Rect exclude, int hx, out double score)
     {
         score = 0;
-        if (icon == null || icon.Empty() || frame1080.Width < icon.Width || frame1080.Height < icon.Height) return null;
-        // Half resolution: 4x faster, still well above the icon's detail.
         const double H = 0.5;
-        using var half = new Mat();
-        Cv2.Resize(frame1080, half, new Size(), H, H, InterpolationFlags.Area);
-        using var tpl = new Mat();
-        Cv2.Resize(icon, tpl, new Size(), H, H, InterpolationFlags.Area);
+        if (tpl == null || tpl.Empty() || half.Width < tpl.Width || half.Height < tpl.Height) return null;
         using var res = new Mat();
         Cv2.MatchTemplate(half, tpl, res, TemplateMatchModes.CCoeffNormed);
-        // Ignore the title and zoom bar area.
-        var ex = new Rect(0, 0, Math.Min(res.Width, (int)(exclude.Right * H)), Math.Min(res.Height, (int)(exclude.Bottom * H)));
-        res[ex].SetTo(Scalar.All(-1));
-        res[new Rect(0, 0, Math.Min(res.Width, (int)(150 * H)), res.Height)].SetTo(Scalar.All(-1));
+        // Ignore the title and zoom bar area (and, on ultrawide screens, the empty side left of it).
+        var ex = new Rect(0, 0, Math.Min(res.Width, (int)((hx + exclude.Right) * H)), Math.Min(res.Height, (int)(exclude.Bottom * H)));
+        using (var r = new Mat(res, ex)) r.SetTo(Scalar.All(-1));
+        using (var r = new Mat(res, new Rect(0, 0, Math.Min(res.Width, (int)((hx + 150) * H)), res.Height))) r.SetTo(Scalar.All(-1));
         Cv2.MinMaxLoc(res, out _, out double max, out _, out Point loc);
         score = max;
         return max >= 0.75 ? new Point2d((loc.X + tpl.Width / 2.0) / H, (loc.Y + tpl.Height / 2.0) / H) : null;
@@ -547,17 +762,30 @@ public sealed class DoorLocator(MapArtCache arts, Mat? header, Mat? orangeIcon =
 
     public string LastInfo { get; private set; } = "";
     string iconScores = "";
+    Mat? halfOrange, halfBlue;
+
+    static Mat HalfIcon(Mat icon)
+    {
+        var m = new Mat();
+        if (!icon.Empty()) Cv2.Resize(icon, m, new Size(), 0.5, 0.5, InterpolationFlags.Area);
+        return m;
+    }
     /// <summary>Door icons seen in the last frame (client pixels), even when no full fit was made.</summary>
     public Point2d? LastOrange { get; private set; }
     public Point2d? LastBlue { get; private set; }
     public bool LastMapOpen { get; private set; }
 
+    /// <summary>The map screen is known to be closed (from its title corner alone): as Match would leave things.</summary>
+    public void MarkClosed() { LastOrange = LastBlue = null; LastMapOpen = false; LastInfo = "map not open"; }
+
     /// <summary>The full map screen's title icon (top-left), so door-coloured things in normal
     /// gameplay are never mistaken for the map.</summary>
-    public bool IsMapOpen(Mat small1080)
+    /// <param name="hx">Where the game's UI area starts in small1080 (1080p px; > 0 on ultrawide screens).</param>
+    public bool IsMapOpen(Mat small1080, int hx = 0)
     {
         if (header == null || header.Empty()) return true;
-        var area = new Rect(0, 0, Math.Min(small1080.Width, 400), Math.Min(small1080.Height, 200));
+        var area = new Rect(hx, 0, Math.Min(small1080.Width - hx, 400), Math.Min(small1080.Height, 200));
+        if (area.Width < header.Width || area.Height < header.Height) return false;
         using var roi = new Mat(small1080, area);
         using var res = new Mat();
         Cv2.MatchTemplate(roi, header, res, TemplateMatchModes.CCoeffNormed);
@@ -582,7 +810,7 @@ public sealed class DoorLocator(MapArtCache arts, Mat? header, Mat? orangeIcon =
     {
         using var m = new Mat();
         Cv2.InRange(hsv, lo, hi, m);
-        if (exclude is Rect ex) m[ex].SetTo(Scalar.Black);
+        if (exclude is Rect ex) using (var r = new Mat(m, ex)) r.SetTo(Scalar.Black);
         using var k = Cv2.GetStructuringElement(MorphShapes.Rect, new Size(7, 7));
         Cv2.Dilate(m, m, k);
         using var labels = new Mat();
@@ -608,21 +836,29 @@ public sealed class DoorLocator(MapArtCache arts, Mat? header, Mat? orangeIcon =
         IReadOnlyCollection<int>? favoured = null)
     {
         arrow = null;
-        // Work at 1080p-equivalent resolution so the icon size limits hold on any screen.
-        double f = 1080.0 / frameBgr.Height;
+        // Work at 1080p-equivalent resolution (of the game's UI, which the map screen's icons follow) so the icon size
+        // limits hold on any screen.
+        var ui = Regions.Hud(frameBgr.Width, frameBgr.Height);
+        double f = 1080.0 / ui.Height;
+        int hx = (int)Math.Round(ui.X * f);
         using var small = new Mat();
         Cv2.Resize(frameBgr, small, new Size(), f, f, f < 1 ? InterpolationFlags.Area : InterpolationFlags.Linear);
         LastOrange = LastBlue = null;
-        LastMapOpen = IsMapOpen(small);
+        LastMapOpen = IsMapOpen(small, hx);
         if (!LastMapOpen) { LastInfo = "map not open"; return null; }
         using var hsv = new Mat();
         Cv2.CvtColor(small, hsv, ColorConversionCodes.BGR2HSV);
-        var hud = new Rect(0, 0, Math.Min(small.Width, 320), Math.Min(small.Height, 300)); // "Map" title / minimap corner
+        var hud = new Rect(0, 0, Math.Min(small.Width, hx + 320), Math.Min(small.Height, 300)); // "Map" title / minimap corner
         (Point2d c, int area)? o = null, b = null;
         if (orangeIcon != null && blueIcon != null)
         {
-            var oc = FindIcon(small, orangeIcon, new Rect(0, 0, 400, 120), out double os);
-            var bc = FindIcon(small, blueIcon, new Rect(0, 0, 400, 120), out double bs);
+            // Half resolution: 4x faster, still well above the icon's detail. Made once for both icons (was once each).
+            using var half = new Mat();
+            Cv2.Resize(small, half, new Size(), 0.5, 0.5, InterpolationFlags.Area);
+            halfOrange ??= HalfIcon(orangeIcon);
+            halfBlue ??= HalfIcon(blueIcon);
+            var oc = FindIcon(half, halfOrange, new Rect(0, 0, 400, 120), hx, out double os);
+            var bc = FindIcon(half, halfBlue, new Rect(0, 0, 400, 120), hx, out double bs);
             if (oc != null) o = (oc.Value, 1);
             if (bc != null) b = (bc.Value, 1);
             iconScores = $"icons o{os:0.00} b{bs:0.00}";
@@ -651,7 +887,7 @@ public sealed class DoorLocator(MapArtCache arts, Mat? header, Mat? orangeIcon =
         // Revealed floor: light, unsaturated pixels (fog is dark blue-grey).
         using var lit = new Mat();
         Cv2.InRange(hsv, new Scalar(0, 0, 141), new Scalar(180, 40, 255), lit);
-        lit[hud].SetTo(Scalar.Black);
+        using (var r = new Mat(lit, hud)) r.SetTo(Scalar.Black);
         int litCount = Cv2.CountNonZero(lit);
 
         var scored = new List<(Layout l, double angErr, double scale, double cover)>();
@@ -758,7 +994,8 @@ public sealed class FloorRefiner(MapArtCache arts)
 
     /// <summary>Explored floor on the full map (light grey or tan), without the title, zoom bar
     /// and icons. frame1080 is the frame resized to 1080p height.</summary>
-    static Mat ScreenFloor(Mat frame1080)
+    /// <param name="hx">Where the game's UI area starts (1080p px; > 0 on ultrawide screens).</param>
+    static Mat ScreenFloor(Mat frame1080, int hx)
     {
         using var hsv = new Mat();
         Cv2.CvtColor(frame1080, hsv, ColorConversionCodes.BGR2HSV);
@@ -767,8 +1004,8 @@ public sealed class FloorRefiner(MapArtCache arts)
         using var tan = new Mat();
         Cv2.InRange(hsv, new Scalar(5, 0, 141), new Scalar(30, 95, 255), tan);
         Cv2.BitwiseOr(floor, tan, floor);
-        floor[new Rect(0, 0, Math.Min(floor.Width, 320), Math.Min(floor.Height, 300))].SetTo(Scalar.Black);
-        floor[new Rect(0, 0, Math.Min(floor.Width, 140), floor.Height)].SetTo(Scalar.Black);
+        using (var r = new Mat(floor, new Rect(0, 0, Math.Min(floor.Width, hx + 320), Math.Min(floor.Height, 300)))) r.SetTo(Scalar.Black);
+        using (var r = new Mat(floor, new Rect(0, 0, Math.Min(floor.Width, hx + 140), floor.Height))) r.SetTo(Scalar.Black);
         using var icons = new Mat();
         Cv2.InRange(hsv, new Scalar(0, 101, 91), new Scalar(180, 255, 255), icons);
         using var k = Cv2.GetStructuringElement(MorphShapes.Rect, new Size(25, 25));
@@ -798,27 +1035,60 @@ public sealed class FloorRefiner(MapArtCache arts)
         return bestPose;
     }
 
-    MapPose? RefineOn(Mat frameBgr, MapPose guess, double spread, int window, int floorIdx)
+    /// <summary>The screen's explored floor as a template, worked out once per frame: it used to be redone for
+    /// every floor tried and for the wide retry (four 1080p conversions of a 4K frame per tick).</summary>
+    sealed class Prepared : IDisposable
     {
-        double f = 1080.0 / frameBgr.Height;
+        public double F;
+        public int Lit;
+        public Rect Box;
+        public Mat? Small, Mask, Tpl, TplMask;
+        /// <summary>The template's frequency-domain side, shared by every zoom, floor and retry of this frame.</summary>
+        public MaskedTemplate? Match;
+        public void Dispose() { Match?.Dispose(); Tpl?.Dispose(); TplMask?.Dispose(); Small?.Dispose(); Mask?.Dispose(); }
+    }
+    Prepared? prep;
+    object? prepFor;
+
+    Prepared Prepare(Mat frameBgr)
+    {
+        if (prep != null && ReferenceEquals(prepFor, frameBgr)) return prep;
+        prep?.Dispose();
+        var ui = Regions.Hud(frameBgr.Width, frameBgr.Height);
+        var p = new Prepared { F = 1080.0 / ui.Height };
+        prep = p; prepFor = frameBgr;
         using var f1080 = new Mat();
-        Cv2.Resize(frameBgr, f1080, new Size(), f, f, InterpolationFlags.Area);
-        using var fl = ScreenFloor(f1080);
-        int lit = Cv2.CountNonZero(fl);
-        LastScore = 0;
-        if (lit < 2000) { LastInfo = $"refine: little floor ({lit})"; return null; }
+        Cv2.Resize(frameBgr, f1080, new Size(), p.F, p.F, InterpolationFlags.Area);
+        using var fl = ScreenFloor(f1080, (int)Math.Round(ui.X * p.F));
+        p.Lit = Cv2.CountNonZero(fl);
+        if (p.Lit < 2000) return p;
         using var flF = new Mat();
         fl.ConvertTo(flF, MatType.CV_32F, 1 / 255.0);
-        using var small = new Mat();
-        Cv2.Resize(flF, small, new Size(), K, K, InterpolationFlags.Area);
+        p.Small = new Mat();
+        Cv2.Resize(flF, p.Small, new Size(), K, K, InterpolationFlags.Area);
         using var dil = new Mat();
         using (var k = Cv2.GetStructuringElement(MorphShapes.Rect, new Size(15, 15))) Cv2.Dilate(fl, dil, k);
-        using var mask = new Mat();
-        Cv2.Resize(dil, mask, small.Size(), 0, 0, InterpolationFlags.Nearest);
-        var box = Cv2.BoundingRect(mask);
-        if (box.Width < 20 || box.Height < 20) return null;
-        using var tpl = new Mat(small, box);
-        using var tm = new Mat(mask, box);
+        p.Mask = new Mat();
+        Cv2.Resize(dil, p.Mask, p.Small.Size(), 0, 0, InterpolationFlags.Nearest);
+        p.Box = Cv2.BoundingRect(p.Mask);
+        if (p.Box.Width >= 20 && p.Box.Height >= 20)
+        {
+            p.Tpl = new Mat(p.Small, p.Box);
+            p.TplMask = new Mat(p.Mask, p.Box);
+            p.Match = new MaskedTemplate(p.Tpl, p.TplMask);
+        }
+        return p;
+    }
+
+    MapPose? RefineOn(Mat frameBgr, MapPose guess, double spread, int window, int floorIdx)
+    {
+        var p = Prepare(frameBgr);
+        double f = p.F;
+        int lit = p.Lit;
+        LastScore = 0;
+        if (lit < 2000) { LastInfo = $"refine: little floor ({lit})"; return null; }
+        var box = p.Box;
+        if (p.Match is not MaskedTemplate tpl) return null;
 
         // Guess in 1080p units.
         double s = guess.Scale * f, tx = guess.Tx * f, ty = guess.Ty * f; // (scale was divided: broke 4K)
@@ -835,14 +1105,22 @@ public sealed class FloorRefiner(MapArtCache arts)
                 // Where the template's top-left should land in A under the base pose.
                 double ex = (x0 - bx) / baseScale * sc * K, ey = (y0 - by) / baseScale * sc * K;
                 int W = Math.Max(2, (int)(win * K));
+                // The art with a P px empty border; only the window searched is built (padding the whole
+                // art was a ~14 MB copy per zoom).
                 int P = Math.Max(tpl.Width, tpl.Height) + W;
-                using var Ap = new Mat();
-                Cv2.CopyMakeBorder(A, Ap, P, P, P, P, BorderTypes.Constant, Scalar.All(0));
                 var roi = new Rect((int)ex + P - W, (int)ey + P - W, tpl.Width + 2 * W, tpl.Height + 2 * W)
-                    .Intersect(new Rect(0, 0, Ap.Width, Ap.Height));
+                    .Intersect(new Rect(0, 0, A.Width + 2 * P, A.Height + 2 * P));
                 if (roi.Width < tpl.Width || roi.Height < tpl.Height) continue;
+                using var part = new Mat(roi.Size, MatType.CV_32F, Scalar.All(0));
+                var from = new Rect(roi.X - P, roi.Y - P, roi.Width, roi.Height).Intersect(new Rect(0, 0, A.Width, A.Height));
+                if (from.Width > 0 && from.Height > 0)
+                {
+                    using var src = new Mat(A, from);
+                    using var dst = new Mat(part, new Rect(from.X - (roi.X - P), from.Y - (roi.Y - P), from.Width, from.Height));
+                    src.CopyTo(dst);
+                }
                 using var r = new Mat();
-                Cv2.MatchTemplate(new Mat(Ap, roi), tpl, r, TemplateMatchModes.CCoeffNormed, tm);
+                tpl.Match(part, r);
                 Cv2.PatchNaNs(r, -1);
                 Cv2.Threshold(r, r, 1.0, 0, ThresholdTypes.TozeroInv);
                 Cv2.Max(r, new Scalar(-1), r);
@@ -884,7 +1162,7 @@ public sealed class IslandTracker(MapArtCache arts)
     Point2d? lastFullBest;
     Point2d? last, jumpCandidate;
     Point2d vel;
-    DateTime lastOk, filterTime;
+    DateTime lastOk, filterTime, jumpSince;
     public double LastScore { get; private set; }
     public string LastInfo { get; private set; } = "";
     public bool Tracking => last != null && (DateTime.UtcNow - lastOk).TotalSeconds < 20;
@@ -953,7 +1231,7 @@ public sealed class IslandTracker(MapArtCache arts)
                 int halfArt = (int)(100 + 60 * lost + gray.Width / 2.0 / kk);
                 var src = new Rect((int)last!.Value.X - halfArt, (int)last.Value.Y - halfArt, 2 * halfArt, 2 * halfArt).Intersect(new Rect(0, 0, full.Width, full.Height));
                 owned = new Mat();
-                Cv2.Resize(new Mat(full, src), owned, new Size(), kk, kk, InterpolationFlags.Area);
+                using (var part = new Mat(full, src)) Cv2.Resize(part, owned, new Size(), kk, kk, InterpolationFlags.Area);
                 map = owned;
                 roi = new Rect(0, 0, map.Width, map.Height);
                 // Positions below are in "scaled full map" units: shift by the crop origin.
@@ -962,7 +1240,7 @@ public sealed class IslandTracker(MapArtCache arts)
             else { map = Art(island, s, work); roi = new Rect(0, 0, map.Width, map.Height); cropX = cropY = 0; }
             if (roi.Width <= gray.Width || roi.Height <= gray.Height) { owned?.Dispose(); continue; }
             using var res = new Mat();
-            Cv2.MatchTemplate(new Mat(map, roi), gray, res, TemplateMatchModes.CCoeffNormed, mask);
+            using (var part = new Mat(map, roi)) Cv2.MatchTemplate(part, gray, res, TemplateMatchModes.CCoeffNormed, mask);
             owned?.Dispose();
             Cv2.PatchNaNs(res, -1);
             Cv2.Threshold(res, res, 1.0, 0, ThresholdTypes.TozeroInv);
@@ -1001,7 +1279,7 @@ public sealed class IslandTracker(MapArtCache arts)
                 int halfArt = (int)(40 + fineSmall.Width / 2.0 / kk);
                 var src = new Rect((int)p.X - halfArt, (int)p.Y - halfArt, 2 * halfArt, 2 * halfArt).Intersect(new Rect(0, 0, full.Width, full.Height));
                 using var crop = new Mat();
-                Cv2.Resize(new Mat(full, src), crop, new Size(), kk, kk, InterpolationFlags.Area);
+                using (var part = new Mat(full, src)) Cv2.Resize(part, crop, new Size(), kk, kk, InterpolationFlags.Area);
                 if (crop.Width <= fineSmall.Width || crop.Height <= fineSmall.Height) continue;
                 using var r2 = new Mat();
                 Cv2.MatchTemplate(crop, fineSmall, r2, TemplateMatchModes.CCoeffNormed, fineMask);
@@ -1024,7 +1302,7 @@ public sealed class IslandTracker(MapArtCache arts)
         LastScore = b.score;
         LastInfo = $"island {b.score:0.00} (2nd {b.second:0.00}) at ({b.p.X:0},{b.p.Y:0}) s{b.s:0.00}";
         var now = DateTime.UtcNow;
-        double dt = Math.Clamp((now - filterTime).TotalSeconds, 0.02, 0.5);
+        double dt = Math.Clamp((now - filterTime).TotalSeconds, 0.005, 0.5);
         // Only ever run when the minimap clearly shows the island, so the bar can be lower than
         // it had to be when Sanctum views were also searched.
         // A whole-island hit only starts a trial: the engine confirms it by tracking on locally
@@ -1048,9 +1326,11 @@ public sealed class IslandTracker(MapArtCache arts)
         var pred = last is Point2d lp && tracking ? new Point2d(lp.X + vel.X * dt, lp.Y + vel.Y * dt) : b.p;
         if (tracking && Math.Abs(b.p.X - pred.X) + Math.Abs(b.p.Y - pred.Y) > 80)
         {
+            // Confirmed by a later fix, at least 30 ms on (as in the Sanctum tracker).
             bool agrees = jumpCandidate is Point2d jc && Math.Abs(jc.X - b.p.X) + Math.Abs(jc.Y - b.p.Y) < 40;
+            if (!agrees) jumpSince = now;
             jumpCandidate = b.p;
-            if (!agrees) return pred;
+            if (!agrees || (now - jumpSince).TotalSeconds < 0.03) return pred;
             last = b.p; vel = default;
         }
         else if (!tracking) { last = b.p; vel = default; }
@@ -1122,7 +1402,7 @@ public static class MapIcons
 
 public sealed class HeadingDetector
 {
-    static List<(Mat tpl, Mat mask)>? eggTemplates;
+    static List<(Mat tpl, Mat mask, MaskedTemplate match)>? eggTemplates;
 
     /// <summary>How much the minimap's centre looks like the egg marker the game shows instead of
     /// the arrow while the player is twined with an egg (0-1). Two crops of the real marker (one
@@ -1139,7 +1419,7 @@ public sealed class HeadingDetector
                 Cv2.Circle(m, new Point(t.Width / 2, t.Height / 2), t.Width / 2 - 2, Scalar.White, -1);
                 Cv2.Circle(m, new Point(t.Width - 3, t.Height - 3), t.Width / 3, Scalar.Black, -1); // number badge
             }
-            return (t, m);
+            return (t, m, t.Empty() ? null! : new MaskedTemplate(t, m));
         }).Where(x => !x.t.Empty()).ToList();
         if (eggTemplates.Count == 0) return 0;
         // Only right at the centre, where the player's own marker sits (an egg lying nearby shows
@@ -1151,11 +1431,12 @@ public sealed class HeadingDetector
         using var crop = new Mat();
         Cv2.Resize(crop0, crop, new Size(), 1 / uiScale, 1 / uiScale, InterpolationFlags.Area);
         double best = 0;
-        foreach (var (tpl, mask) in eggTemplates)
+        using var image = new MatchImage(crop);
+        foreach (var (tpl, _, match) in eggTemplates)
         {
             if (crop.Width <= tpl.Width || crop.Height <= tpl.Height) continue;
             using var res = new Mat();
-            Cv2.MatchTemplate(crop, tpl, res, TemplateMatchModes.CCoeffNormed, mask);
+            match.Match(image, res);
             Cv2.PatchNaNs(res, -1);
             Cv2.Threshold(res, res, 1.0, 0, ThresholdTypes.TozeroInv);
             Cv2.MinMaxLoc(res, out _, out double max, out _, out _);
@@ -1164,22 +1445,68 @@ public sealed class HeadingDetector
         return best;
     }
 
-    static readonly System.Collections.Concurrent.ConcurrentDictionary<(int, int), int[]> coneLuts = new();
+    static readonly System.Collections.Concurrent.ConcurrentDictionary<(int, int, int), (int[] lut, Rect box)> coneLuts = new();
 
-    static int[] ConeLut(int w, int h, int bins) => coneLuts.GetOrAdd((w, h), _ =>
+    /// <summary>Which slice of the ring around the player each pixel falls in (-1: outside the ring), for the
+    /// pixels of the ring's bounding box: only those are converted and read (a quarter of the minimap).</summary>
+    static (int[] lut, Rect box) ConeLut(int w, int h, int bins) => coneLuts.GetOrAdd((w, h, bins), _ =>
     {
-        var lut = new int[w * h];
         double cx = w / 2.0, cy = h / 2.0, R = Math.Min(cx, cy) * 0.84;
         double r0 = R * 0.14, r1 = R * 0.55; // outside the arrow / egg marker, where the cone is brightest
-        for (int y = 0; y < h; y++)
-            for (int x = 0; x < w; x++)
+        var box = Rect.FromLTRB((int)Math.Floor(cx - r1 - 1), (int)Math.Floor(cy - r1 - 1), (int)Math.Ceiling(cx + r1 + 1), (int)Math.Ceiling(cy + r1 + 1))
+            .Intersect(new Rect(0, 0, w, h));
+        var lut = new int[box.Width * box.Height];
+        for (int y = box.Top; y < box.Bottom; y++)
+            for (int x = box.Left; x < box.Right; x++)
             {
                 double dx = x + 0.5 - cx, dy = y + 0.5 - cy, r = Math.Sqrt(dx * dx + dy * dy);
                 double ang = (Math.Atan2(dx, -dy) * 180 / Math.PI + 360) % 360;
-                lut[y * w + x] = r < r0 || r > r1 ? -1 : (int)(ang / (360.0 / bins)) % bins;
+                lut[(y - box.Top) * box.Width + x - box.Left] = r < r0 || r > r1 ? -1 : (int)(ang / (360.0 / bins)) % bins;
             }
-        return lut;
+        return (lut, box);
     });
+
+    [ThreadStatic] static byte[]? conePx;
+
+    /// <summary>Per-slice mean near-white level of the ring: the HSV of the ring's box only, read into a buffer
+    /// kept per thread (it was the whole minimap, copied into a new 130 KB array, a large-object allocation, ~60
+    /// times a second).</summary>
+    static double[] ConeProfile(Mat small, int bins)
+    {
+        var (lut, box) = ConeLut(small.Width, small.Height, bins);
+        using var part = new Mat(small, box);
+        using var hsv = new Mat();
+        Cv2.CvtColor(part, hsv, ColorConversionCodes.BGR2HSV);
+        int len = box.Width * box.Height * 3;
+        if (conePx == null || conePx.Length < len) conePx = new byte[len];
+        var px = conePx;
+        System.Runtime.InteropServices.Marshal.Copy(hsv.Data, px, 0, len);   // (a new Mat is continuous)
+        var sum = new double[bins];
+        var n = new int[bins];
+        for (int i = 0; i < lut.Length; i++)
+        {
+            int b = lut[i];
+            if (b < 0) continue;
+            // Near-white: the cone lifts floor (~175-200) to ~230+ and leaves it unsaturated.
+            byte sat = px[3 * i + 1], val = px[3 * i + 2];
+            if (sat < 50 && val > 205) sum[b] += Math.Min(1, (val - 205) / 35.0);
+            n[b]++;
+        }
+        var prof = new double[bins];
+        for (int i = 0; i < bins; i++) prof[i] = n[i] > 0 ? sum[i] / n[i] : 0;
+        return prof;
+    }
+
+    /// <summary>The median of the profile outside the window of win slices from best.</summary>
+    static double Outside(double[] prof, int best, int win)
+    {
+        int bins = prof.Length;
+        var rest = new double[bins - win];
+        int k = 0;
+        for (int i = 0; i < bins; i++) if (((i - best) % bins + bins) % bins >= win) rest[k++] = prof[i];
+        Array.Sort(rest);
+        return rest[rest.Length / 2];
+    }
 
     /// <summary>Which way the camera looks, from the white view cone the minimap draws from the
     /// player: a soft near-white wedge (~70-90 deg), brightest close to the player. Works when
@@ -1195,23 +1522,8 @@ public sealed class HeadingDetector
         using var small = new Mat();
         double k = 210.0 / Math.Min(minimapBgr.Width, minimapBgr.Height);
         Cv2.Resize(minimapBgr, small, new Size(), k, k, InterpolationFlags.Area);
-        using var hsv = new Mat();
-        Cv2.CvtColor(small, hsv, ColorConversionCodes.BGR2HSV);
         const int Bins = 360;
-        var sum = new double[Bins];
-        var n = new int[Bins];
-        var lut = ConeLut(small.Width, small.Height, Bins);
-        hsv.GetArray(out Vec3b[] px);
-        for (int i = 0; i < px.Length; i++)
-        {
-            int b = lut[i];
-            if (b < 0) continue;
-            var v = px[i];
-            if (v.Item1 < 50 && v.Item2 > 205) sum[b] += Math.Min(1, (v.Item2 - 205) / 35.0);
-            n[b]++;
-        }
-        var raw = new double[Bins];
-        for (int i = 0; i < Bins; i++) raw[i] = n[i] > 0 ? sum[i] / n[i] : 0;
+        var raw = ConeProfile(small, Bins);
         var prof = new double[Bins];                 // lightly smoothed (5 deg), so single pixels don't make edges
         for (int i = 0; i < Bins; i++)
         {
@@ -1229,14 +1541,15 @@ public sealed class HeadingDetector
             if (t > bestSum) { bestSum = t; best = i; }
         }
         double inside = bestSum / Win;
-        var rest = Enumerable.Range(0, Bins).Where(i => ((i - best) % Bins + Bins) % Bins >= Win).Select(i => prof[i]).OrderBy(v => v).ToList();
-        double outside = rest[rest.Count / 2];
+        double outside = Outside(prof, best, Win);
         confidence = Math.Clamp(inside - outside, 0, 1);
         if (inside < 0.25 || inside < outside * 2 + 0.1) return null;
         // the edges: from the arc's middle, outwards until the profile falls below half-way between the cone's
         // plateau and the floor around it (with sub-degree interpolation)
-        var arc = Enumerable.Range(0, Win).Select(j => prof[(best + j) % Bins]).OrderBy(v => v).ToList();
-        double plateau = arc[(int)(arc.Count * 0.75)];
+        var arc = new double[Win];
+        for (int j = 0; j < Win; j++) arc[j] = prof[(best + j) % Bins];
+        Array.Sort(arc);
+        double plateau = arc[(int)(arc.Length * 0.75)];
         double level = outside + 0.5 * (plateau - outside);
         int mid = (best + Win / 2) % Bins;
         double? Edge(int step)
@@ -1262,26 +1575,9 @@ public sealed class HeadingDetector
         using var small = new Mat();
         double k = 105.0 / Math.Min(minimapBgr.Width, minimapBgr.Height); // half resolution of 1080p
         Cv2.Resize(minimapBgr, small, new Size(), k, k, InterpolationFlags.Area);
-        using var hsv = new Mat();
-        Cv2.CvtColor(small, hsv, ColorConversionCodes.BGR2HSV);
         const int Bins = 90; // 4 deg
-        var sum = new double[Bins];
-        var n = new int[Bins];
-        // Which 4-degree slice each pixel of the ring near the player falls in (-1: outside the
-        // ring), worked out once per size: the cone is read ~30 times a second.
-        var lut = ConeLut(small.Width, small.Height, Bins);
-        hsv.GetArray(out Vec3b[] px);
-        for (int i = 0; i < px.Length; i++)
-        {
-            int b = lut[i];
-            if (b < 0) continue;
-            // Near-white: the cone lifts floor (~175-200) to ~230+ and leaves it unsaturated.
-            var v = px[i];
-            if (v.Item1 < 50 && v.Item2 > 205) sum[b] += Math.Min(1, (v.Item2 - 205) / 35.0);
-            n[b]++;
-        }
-        var prof = new double[Bins];
-        for (int i = 0; i < Bins; i++) prof[i] = n[i] > 0 ? sum[i] / n[i] : 0;
+        // Which 4-degree slice each pixel of the ring near the player falls in: worked out once per size.
+        var prof = ConeProfile(small, Bins);
         // The best ~72 deg arc, then its brightness-weighted centre.
         const int Win = 18;
         int best = 0; double bestSum = -1;
@@ -1292,8 +1588,7 @@ public sealed class HeadingDetector
             if (t > bestSum) { bestSum = t; best = i; }
         }
         double inside = bestSum / Win;
-        var rest = Enumerable.Range(0, Bins).Where(i => ((i - best) % Bins + Bins) % Bins >= Win).Select(i => prof[i]).OrderBy(v => v).ToList();
-        double outside = rest[rest.Count / 2];
+        double outside = Outside(prof, best, Win);
         confidence = Math.Clamp(inside - outside, 0, 1);
         if (inside < 0.25 || inside < outside * 2 + 0.1) return null;
         double sx = 0, sy = 0;
@@ -1306,7 +1601,7 @@ public sealed class HeadingDetector
         return (Math.Atan2(sx, sy) * 180 / Math.PI + 360) % 360;
     }
 
-    readonly List<(double angle, Mat bgr, Mat mask)> bank = new();
+    readonly List<(double angle, Mat bgr, Mat mask, MaskedTemplate match)> bank = new();
     public double LastScore { get; private set; }
 
     public HeadingDetector(string spritePath)
@@ -1326,7 +1621,7 @@ public sealed class HeadingDetector
             var mask = new Mat();
             Cv2.Threshold(ch[3], mask, 150, 255, ThresholdTypes.Binary);
             foreach (var c in ch) c.Dispose();
-            bank.Add((a, bgr, mask));
+            bank.Add((a, bgr, mask, new MaskedTemplate(bgr, mask)));
         }
     }
 
@@ -1344,12 +1639,14 @@ public sealed class HeadingDetector
         using var crop0 = new Mat(minimapBgr, roi);
         using var crop = new Mat();
         Cv2.Resize(crop0, crop, new Size(48, 48), 0, 0, InterpolationFlags.Area);
+        // The crop goes to the frequency domain once for all the rotations tried (11 with a hint, 34 without).
+        using var image = new MatchImage(crop);
         double Score(int i)
         {
-            var (_, bgr, mask) = bank[i];
+            var (_, bgr, _, match) = bank[i];
             if (crop.Width < bgr.Width || crop.Height < bgr.Height) return -1;
             using var res = new Mat();
-            Cv2.MatchTemplate(crop, bgr, res, TemplateMatchModes.CCoeffNormed, mask);
+            match.Match(image, res);
             Cv2.PatchNaNs(res, -1);
             Cv2.Threshold(res, res, 1.0, 0, ThresholdTypes.TozeroInv);
             Cv2.MinMaxLoc(res, out _, out double max, out _, out _);
