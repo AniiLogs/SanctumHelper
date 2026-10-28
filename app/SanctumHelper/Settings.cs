@@ -129,12 +129,21 @@ public sealed class Settings
         return new Settings();
     }
 
+    static readonly object saving = new();
+
     public void Save()
     {
         Directory.CreateDirectory(Dir);
-        var json = JsonSerializer.Serialize(this, Json);
-        LastJson = json;
-        File.WriteAllText(FilePath, json);
+        // Saved from the engine and the window's threads: one at a time, and written whole (temp file, then
+        // replaced), so a crash or a second save can't leave a cut-off file that loads as the defaults.
+        lock (saving)
+        {
+            var json = JsonSerializer.Serialize(this, Json);
+            LastJson = json;
+            var tmp = FilePath + ".tmp";
+            File.WriteAllText(tmp, json);
+            File.Move(tmp, FilePath, true);
+        }
         // Hosted by the aLogs app, which starts with Windows itself.
         if (!Hosted.Active) ApplyStartup();
     }

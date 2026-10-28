@@ -1170,6 +1170,9 @@ public sealed class IslandTracker(MapArtCache arts)
 
     public void Reset() { scale = null; last = null; vel = default; }
 
+    /// <summary>Lets the resized island art go (about 13 MB; it was kept until Sanctum Helper closed).</summary>
+    public void Release() => Later.Dispose(Later.Take(art, _ => false));
+
     /// <summary>Start from a known spot (the arrow on the full island map).</summary>
     public void Seed(Point2d pos) { last = pos; vel = default; lastOk = filterTime = DateTime.UtcNow; }
 

@@ -143,6 +143,8 @@ public sealed class Engine : IDisposable
     Thread? thread;
     volatile bool running;
     volatile bool resetRequested;
+    long? gameGoneSince;          // engine clock (ms) when the game window was lost
+    bool debugCleared;            // the debug folder was emptied since debug frames were last on
     bool toggled;
 
     public event Action<OverlayFrame>? Frame;
@@ -295,12 +297,25 @@ public sealed class Engine : IDisposable
                 {
                     resetRequested = false;
                     CurrentLayout = null; lastPose = null; player = null; minimap.Reset();
-                    onIsland = false; islandPlayer = null; islandPose = null; islandTracker.Reset();
+                    onIsland = false; islandPlayer = null; islandPose = null; islandTracker.Reset(); islandTracker.Release();
                     ClearGuesses();
                     arts.Trim(_ => false); refiner.Trim(_ => false); minimap.Release(); features.Trim(_ => false);
                     settings.RunLayout = 0;
                     try { settings.Save(); } catch { /* not critical */ }
                     StatusChanged?.Invoke();
+                }
+                // Debug frames turned off: the ones saved go (up to 200 whole-screen pictures, kept until now)
+                if (settings.SaveDebugFrames) debugCleared = false;
+                else if (!debugCleared)
+                {
+                    debugCleared = true;
+                    var debugDir = Path.Combine(Settings.Dir, "debug");
+                    if (Directory.Exists(debugDir))
+                        System.Threading.Tasks.Task.Run(() =>
+                        {
+                            try { Directory.Delete(debugDir, true); Log.Write("debug frames off: removed the saved ones"); }
+                            catch (Exception e) { Log.Write("debug frames: " + e.Message); }
+                        });
                 }
                 hook.Poll();
                 // The controller button works like the overlay key (held, or pressed to toggle).
@@ -363,10 +378,19 @@ public sealed class Engine : IDisposable
                 if (!GameFound)
                 {
                     if (wasShowing) { Frame?.Invoke(new OverlayFrame(default, false, null, null, null, false, null, "")); wasShowing = false; }
+                    // The game closed for a minute: the run is over, let its maps go (they stayed loaded, 300-500 MB,
+                    // until Sanctum Helper itself closed). Only the in-game checks below did this before.
+                    gameGoneSince ??= now;
+                    if (now - gameGoneSince > 60_000 && (CurrentLayout != null || arts.Loaded > 0) && !resetRequested)
+                    {
+                        Log.Write("game closed for a minute: forgetting the run and its maps");
+                        resetRequested = true;
+                    }
                     Thread.Sleep(400);
                     continue;
                 }
 
+                gameGoneSince = null;
                 bool show = (settings.ToggleMode ? toggled : hook.IsDown || padDown) && game.IsForeground;
                 if (show && !wasShowing) { miniShowing = false; heldSince = now; Log.Write($"overlay key down ({(padDown ? "controller " + Gamepad.Name(settings.HoldButton) : KeyHook.Name(hook.Key))})"); }
                 if (show)
