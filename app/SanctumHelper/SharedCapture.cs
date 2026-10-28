@@ -6,24 +6,33 @@ using OpenCvSharp;
 
 namespace SanctumHelper;
 
-/// <summary>Reads the game frame the aLogs app shares with its modules, so the game window is
-/// copied once instead of once per tool. While the app runs, whole frames come only from here
-/// (Engine.Grab waits for the next one); when it isn't running (standalone Sanctum Helper), TryGrab
-/// returns null and the normal window capture is used.
+/// <summary>Reads the game picture the aLogs app shares with its modules, so the game is captured once for all
+/// tools, on the graphics card. While the app runs, pictures come only from here (Engine.Grab waits for the next
+/// one); when it isn't running (standalone Sanctum Helper), TryGrab returns null and the normal window capture is used.
 ///
-/// Layout of "Local\aLogs.Capture.v1" (little-endian; written by aLogs app/src-tauri/src/capture.rs):
-///   0 u32 magic "ALCP", 4 u32 version, 8 u64 seq (odd while writing),
-///   16 u32 width, 20 u32 height, 24 u32 stride, 28 u32 flags (bit 0 = valid image, bit 1 = a copy of
-///   the screen: the game window gives no picture on this PC), 32 u64 frame time (unix ms),
-///   40 u64 window handle, 48/52 i32 client x/y, 60 u32 how long the copy took (microseconds),
-///   64 request slots: 16 x { u64 wanted until (unix ms), u32 interval ms, u32 process id },
-///   4096 pixels, BGRA, top row first.</summary>
+/// We ask for the box around everything we read in the last couple of seconds; only that leaves the graphics card,
+/// and the app writes it into our own picture buffer at our own pace (a part outside it is asked for and taken
+/// from the next picture).
+///
+/// Layout of "Local\aLogs.Capture.v2" (little-endian; written by aLogs app/src-tauri/src/capture.rs):
+///   0 u32 magic "ALCP", 4 u32 version (2), 8 u64 header seq, 16 u32 client width, 20 u32 client height,
+///   28 u32 flags (bit 0 = valid image, bit 1 = our overlays may be in it: Desktop Duplication; bits 4-7 source),
+///   32 u64 newest picture time (unix ms), 40 u64 window handle, 48/52 i32 client x/y,
+///   64 request slots: 16 x 16 { u64 wanted until (unix ms), u32 interval ms, u32 process id },
+///   320 picture slots: 16 x 64 { 0 u16 x0, y0, x1, y1 (share of the client size, 0-65535), 8 u32 request id,
+///   12 u32 served id, 16 u64 seq (odd while written), 24 u64 picture time, 32 u32 pixel offset from 4096,
+///   36 u32 stride, 40 u16 x, y, w, h (client pixels), 48 u32 flags, 52 u32 copy microseconds,
+///   56 u16 client width, height, 60 u8 shrink wanted, 61 u8 shrink used },
+///   2048 u64 heartbeat (unix ms) of the app's capture thread,
+///   4096 the pictures, BGRA, top row first.</summary>
 public static class SharedCapture
 {
-    const string Name = @"Local\aLogs.Capture.v1";
+    const string Name = @"Local\aLogs.Capture.v2";
     const uint Magic = 0x50434C41; // "ALCP"
-    const int Header = 4096, Slots = 16, SlotBase = 64;
-    const long Size = Header + 3840L * 2160 * 4;
+    const int Header = 4096, Slots = 16, SlotBase = 64, PictureBase = 320, Picture = 64;
+    const int Heartbeat = 2048;      // the app's capture thread stamps it (unix ms)
+    const long HeartbeatStaleMs = 5000; // older: the app was closed, so the mapping is let go
+    const long AreaKeepMs = 2000; // an area stays asked for this long after its last use
 
     static MemoryMappedFile? file;
     static MemoryMappedViewAccessor? view;
@@ -35,6 +44,9 @@ public static class SharedCapture
     static readonly object gate = new();
     static bool announced;
     static long lastUsed;
+    static readonly System.Collections.Generic.List<(long At, Rect Area)> areas = new();
+    static Rect box;
+    static uint request;
 
     /// <summary>True while frames have recently come from the aLogs app.</summary>
     public static bool InUse => lastUsed != 0 && Environment.TickCount64 - lastUsed < 3000;
@@ -43,15 +55,28 @@ public static class SharedCapture
     /// <summary>Set false to never use the shared frame.</summary>
     public static bool Enabled { get; set; } = true;
 
-    /// <summary>The aLogs app is running and sharing its capture: then whole frames come only from it (one
-    /// capture for all of aLogs), and we wait for its next frame instead of copying the window ourselves.</summary>
-    public static bool AppPresent { get { if (!Enabled) return false; lock (gate) return Open(); } }
+    /// <summary>The aLogs app is running and sharing its capture: then pictures come only from it, and we wait for
+    /// its next one instead of copying the window ourselves.</summary>
+    public static bool AppPresent
+    {
+        get
+        {
+            if (!Enabled) return false;
+            lock (gate)
+            {
+                if (!Open()) return false;
+                long beat = I64(Heartbeat);
+                if (beat != 0 && NowMs - beat > HeartbeatStaleMs) { Close(); return false; }   // the app is gone
+                return true;
+            }
+        }
+    }
 
-    /// <summary>The last frame we took was a copy of the screen (flags bit 1: the game window gives no picture on
-    /// this PC), so our overlay must be hidden from capture or it would show up in the frames.</summary>
+    /// <summary>The last picture we took may have our overlays in it (flags bit 1: Desktop Duplication), so our
+    /// overlay must be hidden from capture.</summary>
     public static bool ScreenCopy { get; private set; }
 
-    /// <summary>How long the app took to copy the last frame we took (ms).</summary>
+    /// <summary>How long the app took to read our last picture off the graphics card (ms).</summary>
     public static double CopyMs { get; private set; }
 
     static long NowMs => DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
@@ -64,7 +89,7 @@ public static class SharedCapture
         try
         {
             file = MemoryMappedFile.OpenExisting(Name, MemoryMappedFileRights.ReadWrite);
-            view = file.CreateViewAccessor(0, Size, MemoryMappedFileAccess.ReadWrite);
+            view = file.CreateViewAccessor(0, 0, MemoryMappedFileAccess.ReadWrite); // the whole mapping
             var p = view.SafeMemoryMappedViewHandle.DangerousGetHandle() + (nint)view.PointerOffset;
             if ((uint)Marshal.ReadInt32(p) != Magic) { Close(); return false; }
             basePtr = p;
@@ -83,21 +108,24 @@ public static class SharedCapture
         view = null; file = null; basePtr = IntPtr.Zero; slot = -1;
     }
 
+    static int U16(int at) => (ushort)Marshal.ReadInt16(basePtr, at);
     static uint U32(int at) => (uint)Marshal.ReadInt32(basePtr, at);
     static long I64(int at) => Marshal.ReadInt64(basePtr, at);
 
-    /// <summary>Keeps our request slot alive: frames are captured only while someone asks.</summary>
+    /// <summary>Keeps our request slot alive: pictures are taken only while someone asks.</summary>
     static bool Request(long now)
     {
         if (slot < 0 || U32(SlotBase + slot * 16 + 12) != (uint)pid)
         {
             slot = -1;
+            box = default;
             for (int i = 0; i < Slots && slot < 0; i++)
             {
                 int at = SlotBase + i * 16;
                 if (I64(at) < now || U32(at + 12) == (uint)pid) slot = i;
             }
             if (slot < 0) return false;
+            Marshal.WriteByte(basePtr, PictureBase + slot * Picture + 60, 0);   // no shrink (its last owner may have asked)
         }
         int a = SlotBase + slot * 16;
         Marshal.WriteInt32(basePtr, a + 12, pid);
@@ -106,41 +134,71 @@ public static class SharedCapture
         return true;
     }
 
-    /// <summary>The part `sub` (client coordinates) of the shared frame as BGR, or null when there
-    /// is no fresh frame of this window at this size.</summary>
+    /// <summary>Asks for the box (shares of the client size, 0-65535) around `area` and the areas used lately;
+    /// a new box gets a new request id.</summary>
+    static void AskArea(Rect area)
+    {
+        long t = Environment.TickCount64;
+        areas.RemoveAll(a => t - a.At > AreaKeepMs || a.Area == area);
+        areas.Add((t, area));
+        int x0 = int.MaxValue, y0 = int.MaxValue, x1 = 0, y1 = 0;
+        foreach (var (_, a) in areas) { x0 = Math.Min(x0, a.X); y0 = Math.Min(y0, a.Y); x1 = Math.Max(x1, a.Right); y1 = Math.Max(y1, a.Bottom); }
+        var want = new Rect(x0, y0, x1 - x0, y1 - y0);
+        int at = PictureBase + slot * Picture;
+        if (want == box && U32(at + 8) == request) return;
+        box = want;
+        request = request % uint.MaxValue + 1;
+        Marshal.WriteInt16(basePtr, at, (short)(ushort)x0);
+        Marshal.WriteInt16(basePtr, at + 2, (short)(ushort)y0);
+        Marshal.WriteInt16(basePtr, at + 4, (short)(ushort)x1);
+        Marshal.WriteInt16(basePtr, at + 6, (short)(ushort)y1);
+        Marshal.WriteInt32(basePtr, at + 8, (int)request);
+    }
+
+    /// <summary>The part `sub` (client coordinates) of the shared picture as BGR, or null when there
+    /// is no fresh picture of this window at this size holding that part.</summary>
     public static Mat? TryGrab(IntPtr hwnd, int clientW, int clientH, Rect sub)
     {
         if (!Enabled) return null;
         lock (gate)
         {
             long t = Environment.TickCount64;
-            // Ask at the pace we're being called: ~60 a second while the overlay key is held (down to
-            // 16 ms, was 40: a frame could be 40 ms old before we even read it), twice a second on the
+            // Ask at the pace we're being called: ~60 a second while the overlay key is held, twice a second on the
             // party screen, nothing otherwise (the request lapses).
             if (lastCall != 0) interval = Math.Clamp(0.7 * interval + 0.3 * (t - lastCall), 16, 1000);
             lastCall = t;
             if (!Open()) return null;
             long now = NowMs;
             if (!Request(now)) return null;
+            sub = sub.Intersect(new Rect(0, 0, clientW, clientH));
+            if (sub.Width <= 0 || sub.Height <= 0) return null;
+            int sx0 = (int)((long)sub.X * 65535 / clientW), sy0 = (int)((long)sub.Y * 65535 / clientH);
+            int sx1 = (int)Math.Min(65535, ((long)sub.Right * 65535 + clientW - 1) / clientW);
+            int sy1 = (int)Math.Min(65535, ((long)sub.Bottom * 65535 + clientH - 1) / clientH);
+            AskArea(new Rect(sx0, sy0, sx1 - sx0, sy1 - sy0));
+            if (I64(40) != (long)hwnd) return null;
+            int at = PictureBase + slot * Picture;
             for (int attempt = 0; attempt < 4; attempt++)
             {
-                long seq = Seq();
+                long seq = Seq(at + 16);
                 if ((seq & 1) != 0) { Thread.SpinWait(200); continue; }
-                int w = (int)U32(16), h = (int)U32(20), stride = (int)U32(24);
-                if ((U32(28) & 1) == 0 || I64(40) != (long)hwnd || w != clientW || h != clientH) return null;
-                // Too old: take our own copy instead (was up to 150 ms accepted at any pace). Not much
-                // less than 100 ms: a whole 4K window copy takes ~30-70 ms, so our own wouldn't be newer.
-                if (now - I64(32) > Math.Max(100, 2 * interval)) return null;
-                sub = sub.Intersect(new Rect(0, 0, w, h));
-                if (sub.Width <= 0 || sub.Height <= 0) return null;
-                var src = basePtr + Header + sub.Y * stride + sub.X * 4;
+                if (U32(at + 12) != request) return null;                  // our area isn't in yet
+                uint flags = U32(at + 48);
+                if ((flags & 1) == 0 || U16(at + 56) != clientW || U16(at + 58) != clientH) return null;
+                if (Marshal.ReadByte(basePtr, at + 61) > 1) return null;   // shrunk: not what we asked for
+                // Too old: no picture this time (accepted up to 100 ms, or two of our intervals).
+                if (now - I64(at + 24) > Math.Max(100, 2 * interval)) return null;
+                int offset = (int)U32(at + 32), stride = (int)U32(at + 36);
+                var pic = new Rect(U16(at + 40), U16(at + 42), U16(at + 44), U16(at + 46));
+                if (pic.Intersect(sub) != sub) return null;                // a picture of an older, smaller box
+                var src = basePtr + Header + offset + (sub.Y - pic.Y) * stride + (sub.X - pic.X) * 4;
                 using var bgra = Mat.FromPixelData(sub.Height, sub.Width, MatType.CV_8UC4, src, stride);
                 var bgr = new Mat();
                 Cv2.CvtColor(bgra, bgr, ColorConversionCodes.BGRA2BGR);
-                if (Seq() == seq)
+                if (Seq(at + 16) == seq)
                 {
-                    ScreenCopy = (U32(28) & 2) != 0;
-                    CopyMs = U32(60) / 1000.0;
+                    ScreenCopy = (flags & 2) != 0;
+                    CopyMs = U32(at + 52) / 1000.0;
                     if (!announced) { announced = true; Log.Write("using the aLogs app's shared capture"); }
                     lastUsed = Environment.TickCount64;
                     return bgr;
@@ -151,12 +209,12 @@ public static class SharedCapture
         }
     }
 
-    /// <summary>The frame's sequence number (aligned 8-byte read, so atomic on x64), fenced so the
-    /// pixel reads stay between the two checks.</summary>
-    static long Seq()
+    /// <summary>A sequence number (aligned 8-byte read, so atomic on x64), fenced so the pixel reads stay
+    /// between the two checks.</summary>
+    static long Seq(int at)
     {
         Interlocked.MemoryBarrier();
-        long seq = Marshal.ReadInt64(basePtr, 8);
+        long seq = Marshal.ReadInt64(basePtr, at);
         Interlocked.MemoryBarrier();
         return seq;
     }

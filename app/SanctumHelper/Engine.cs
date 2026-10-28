@@ -474,11 +474,14 @@ public sealed class Engine : IDisposable
                 double ui = Regions.Ui(c.Width, c.Height);
                 var rc = Regions.ToClient(settings.MinimapRegion, Anchor.TopLeft, c.Width, c.Height);
                 if (rc.Width < 40) { Thread.Sleep(250); continue; }
-                // One copy of the HUD corner per cycle, for the arrow/cone here and for tracking
-                // (each screen copy waits for the desktop to compose a frame: fewer is smoother).
+                // One copy of the HUD corner per cycle, for the arrow/cone here and for tracking. With the aLogs app
+                // running it comes from the app's GPU capture (only this corner leaves the graphics card); a screen
+                // copy here ~60 times a second made the desktop finish composing each time and the game stutter.
                 var corner = CornerRect(rc, c);
                 long grabbed = Environment.TickCount64;
-                var top = ScreenGrabber.Grab(new Rect(c.X + corner.X, c.Y + corner.Y, corner.Width, corner.Height));
+                var top = SharedCapture.AppPresent ? SharedCapture.TryGrab(game.Handle, c.Width, c.Height, corner)
+                    : ScreenGrabber.Grab(new Rect(c.X + corner.X, c.Y + corner.Y, corner.Width, corner.Height));
+                if (top == null) { Thread.Sleep(4); continue; }   // no fresh shared frame yet
                 lock (cornerGate) { sharedCorner?.Dispose(); sharedCorner = top; sharedCornerAt = grabbed; sharedCornerSeq++; }
                 cornerReady.Set();   // the tracking loop picks it up right away instead of on its next tick
                 using (var mm = new Mat(top, InCorner(rc, corner)))
@@ -661,10 +664,10 @@ public sealed class Engine : IDisposable
             if (shared != null && SharedCapture.ScreenCopy && !sharedScreenCopy)
             {
                 sharedScreenCopy = true;
-                Log.Write("the aLogs app shares copies of the screen (the game window gives no picture): overlay hidden from recordings");
+                Log.Write("the aLogs app shares its Desktop Duplication picture (overlays can be in it): overlay hidden from recordings");
                 CaptureFallback?.Invoke();
             }
-            perfSource = SharedCapture.ScreenCopy ? "shared screen copy" : "shared window";
+            perfSource = SharedCapture.ScreenCopy ? "shared desktop duplication" : "shared window capture";
             return shared ?? new Mat(Math.Max(1, sub.Height), Math.Max(1, sub.Width), MatType.CV_8UC3, Scalar.Black);
         }
         perfSource = settings.RecordableOverlay && !printWindowFailed ? "own window" : "own screen copy";
@@ -745,7 +748,8 @@ public sealed class Engine : IDisposable
         // 27 ms for a whole-window capture; no overlay ever draws over the HUD corner).
         var grabbedAt = DateTime.UtcNow;     // when the picture was taken (the heading loop's copy: a few ms ago)
         using var top = fullFrame != null ? new Mat(fullFrame, corner).Clone()
-            : TakeSharedCorner(corner, ref grabbedAt) ?? ScreenGrabber.Grab(new Rect(c.X + corner.X, c.Y + corner.Y, corner.Width, corner.Height));
+            : TakeSharedCorner(corner, ref grabbedAt) ?? (SharedCapture.AppPresent ? Grab(corner)
+                : ScreenGrabber.Grab(new Rect(c.X + corner.X, c.Y + corner.Y, corner.Width, corner.Height)));
         // Counts of "N readings in a row" below were tuned at ~20 ticks a second: they only advance
         // on ticks at least 45 ms apart, so they still span the same time at today's faster ticks.
         bool slowTick = clock.ElapsedMilliseconds - lastSlowTick >= 45;

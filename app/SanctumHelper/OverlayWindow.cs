@@ -51,7 +51,9 @@ public sealed class OverlayWindow : Window
     {
         forceExclude |= screenFallback;
         if (hwnd == IntPtr.Zero) return;
-        bool exclude = forceExclude || !settings.RecordableOverlay;
+        // over the game's minimap (experimental) the map covers what's read: always kept out of the pictures, or a
+        // screen copy (standalone, or the app's Desktop Duplication before its first picture says so) reads it
+        bool exclude = forceExclude || !settings.RecordableOverlay || settings.MiniMapCorner == "OverGame";
         Native.SetWindowDisplayAffinity(hwnd, exclude ? Native.WDA_EXCLUDEFROMCAPTURE : Native.WDA_NONE);
     }
 
@@ -559,6 +561,13 @@ public sealed class OverlayView : FrameworkElement
         return s;
     }
 
+    /// <summary>Experimental "over the game's minimap" placement, for the corner and round maps (not while placing).</summary>
+    bool CoversGameMap(string style) => settings.MiniMapCorner == "OverGame" && style is "Corner" or "Disc" && !Placing;
+
+    /// <summary>The on-screen map's opacity: solid while it covers the game's minimap, so that doesn't show through.</summary>
+    double MiniOpacity => settings.MiniMapCorner == "OverGame" && settings.MiniMapMode is "Corner" or "Disc" && !Placing
+        ? 1.0 : settings.MiniMapOpacity;
+
     /// <summary>Size of the panel for a style, in screen pixels.</summary>
     Size PanelSize(string style, double ui)
     {
@@ -571,6 +580,13 @@ public sealed class OverlayView : FrameworkElement
     /// game's own minimap and quest text in the top-left corner.</summary>
     public Rect MiniPanel(string style, double clientW, double clientH, double ui)
     {
+        if (CoversGameMap(style))
+        {
+            // exactly over the game's minimap (where it's read from), as a square around its centre
+            var m = Regions.ToClient(settings.MinimapRegion, Anchor.TopLeft, (int)clientW, (int)clientH);
+            double side = Math.Max(m.Width, m.Height);
+            return new Rect(m.X + m.Width / 2.0 - side / 2, m.Y + m.Height / 2.0 - side / 2, side, side);
+        }
         var sz = PanelSize(style, ui);
         Point c;
         if (settings.MiniMapX is double fx && settings.MiniMapY is double fy) c = new Point(fx * clientW, fy * clientH);
@@ -659,7 +675,7 @@ public sealed class OverlayView : FrameworkElement
         double tx = c.X - me.X * scale, ty = c.Y - me.Y * scale;
         Point P(double[] img) => new(img[0] * scale + tx, img[1] * scale + ty);
         var clip = new RectangleGeometry(panel, 18 * ui, 18 * ui);
-        dc.PushOpacity(settings.MiniMapOpacity);
+        dc.PushOpacity(MiniOpacity);
         dc.DrawGeometry(PanelFill, null, clip);
         dc.PushClip(clip);
         var bmp = Image(L, f.Floor);
@@ -712,7 +728,7 @@ public sealed class OverlayView : FrameworkElement
         double tx = c.X - me.X * scale, ty = c.Y - me.Y * scale;
         Point P(double[] img) => new(img[0] * scale + tx, img[1] * scale + ty);
         var clip = new EllipseGeometry(c, r, r);
-        dc.PushOpacity(settings.MiniMapOpacity);
+        dc.PushOpacity(MiniOpacity);
         dc.DrawGeometry(PanelFill, null, clip);
         dc.PushClip(clip);
         dc.PushTransform(new RotateTransform(turn, c.X, c.Y));
@@ -752,7 +768,7 @@ public sealed class OverlayView : FrameworkElement
         double r = panel.Width / 2;
         double tx = c.X - me.X * scale, ty = c.Y - me.Y * scale;
         var clip = new EllipseGeometry(c, r, r);
-        dc.PushOpacity(settings.MiniMapOpacity);
+        dc.PushOpacity(MiniOpacity);
         dc.DrawGeometry(RadarFill, null, clip);
         dc.PushClip(clip);
         if (L.IsIsland)
@@ -819,7 +835,7 @@ public sealed class OverlayView : FrameworkElement
         double ppd = half / 90; // pixels per degree
         double Rel(double bearing) => ((bearing - facing) % 360 + 540) % 360 - 180;
 
-        dc.PushOpacity(settings.MiniMapOpacity);
+        dc.PushOpacity(MiniOpacity);
         // Fades out at both ends instead of stopping in a hard box.
         var ends = new LinearGradientBrush { StartPoint = new Point(0, 0), EndPoint = new Point(1, 0) };
         ends.GradientStops.Add(new GradientStop(Color.FromArgb(0, 0, 0, 0), 0));

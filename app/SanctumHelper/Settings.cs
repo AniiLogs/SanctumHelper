@@ -55,6 +55,9 @@ public sealed class Settings
     // On-screen map while the full map is closed: one of OverlayView.MiniMapStyles ("Corner",
     // "Disc", "Radar", "Compass", "Overlay" (Diablo-style) or "Off").
     public string MiniMapMode { get; set; } = "Corner";
+    /// <summary>"TopRight", "TopCenter", or "OverGame" (experimental): the corner or round map drawn exactly over the
+    /// game's own minimap, opaque. The game's minimap is still read underneath: window capture never sees overlays,
+    /// and with screen pictures (Desktop Duplication) the overlay is hidden from capture.</summary>
     public string MiniMapCorner { get; set; } = "TopRight";
     /// <summary>Where the user dragged the on-screen map: its centre as a share of the game's
     /// width and height (so it survives resolution changes). Null = the default spot.</summary>
