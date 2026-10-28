@@ -61,7 +61,7 @@
             </Grid.RowDefinitions>
 
             <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Top">
-                <Button Style="{StaticResource ChromeButton}" Content="&#xE921;" Click="Minimize_Click" WindowChrome.IsHitTestVisibleInChrome="True" ToolTip="{l:T 'Minimise'}"/>
+                <Button Style="{StaticResource ChromeButton}" Content="&#xE921;" Click="Minimize_Click" WindowChrome.IsHitTestVisibleInChrome="True" ToolTip="{l:T 'Minimize'}"/>
                 <Button Style="{StaticResource CloseButton}" Content="&#xE8BB;" Click="Close_Click" WindowChrome.IsHitTestVisibleInChrome="True" ToolTip="{l:T 'Close (Sanctum Helper keeps running in the tray)'}"/>
             </StackPanel>
 
@@ -128,7 +128,7 @@
                                 <StackPanel Grid.Column="1" Margin="0,0,16,0">
                                     <TextBlock Text="2" FontSize="20" FontWeight="Bold" Foreground="{StaticResource Accent}"/>
                                     <TextBlock Style="{StaticResource RowTitle}" Text="{l:T 'Explore the Sanctum'}" FontWeight="SemiBold" Margin="0,2,0,0"/>
-                                    <TextBlock Style="{StaticResource Hint}" Text="{l:T 'The layout is recognised from your minimap. Opening the full map identifies it instantly.'}"/>
+                                    <TextBlock Style="{StaticResource Hint}" Text="{l:T 'The layout is recognized from your minimap. Opening the full map identifies it instantly.'}"/>
                                 </StackPanel>
                                 <StackPanel Grid.Column="2">
                                     <TextBlock Text="3" FontSize="20" FontWeight="Bold" Foreground="{StaticResource Accent}"/>
@@ -303,7 +303,7 @@
                                 <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
                                 <StackPanel Margin="0,0,16,0">
                                     <TextBlock Style="{StaticResource RowTitle}" Text="{l:T 'Difficulty'}"/>
-                                    <TextBlock Style="{StaticResource Hint}" Text="{l:T 'Normal, Hard, Nightmare or Chaos, in its own colour.'}"/>
+                                    <TextBlock Style="{StaticResource Hint}" Text="{l:T 'Normal, Hard, Nightmare or Chaos, in its own color.'}"/>
                                 </StackPanel>
                                 <CheckBox x:Name="CaptionDifficulty" Grid.Column="1" Style="{StaticResource Switch}"/>
                             </Grid>
@@ -409,7 +409,7 @@
                                 <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
                                 <StackPanel Margin="0,0,16,0">
                                     <TextBlock Style="{StaticResource RowTitle}" Text="{l:T 'Layout'}"/>
-                                    <TextBlock Style="{StaticResource Hint}" Text="{l:T 'Auto recognises it from your minimap as you explore, or straight away from the full map\'s door icons.'}"/>
+                                    <TextBlock Style="{StaticResource Hint}" Text="{l:T 'Auto recognizes it from your minimap as you explore, or straight away from the full map\'s door icons.'}"/>
                                 </StackPanel>
                                 <ComboBox x:Name="ForcedLayout" Grid.Column="1" MinWidth="300" MaxWidth="340" VerticalAlignment="Center"/>
                             </Grid>

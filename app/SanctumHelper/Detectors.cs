@@ -9,7 +9,7 @@ public enum Anchor { TopCenter, TopRight, TopLeft }
 
 public static class Regions
 {
-    /// <summary>The game's UI area in a client of any size: a 16:9 box, as tall as the window and centred on wider
+    /// <summary>The game's UI area in a client of any size: a 16:9 box, as tall as the window and centered on wider
     /// screens (21:9 ultrawide: pillarboxed), as wide as the window and kept to the top on narrower ones (16:10). Its
     /// height / 1080 is the UI scale (1920x1200 is 1.0, not 1.11; 3440x1440 is 1.33 with the UI starting 440 px in).</summary>
     public static Rect Hud(int w, int h)

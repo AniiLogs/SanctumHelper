@@ -94,7 +94,7 @@ public partial class SettingsWindow : Window
             });
         }
         MiniMapStyles.SelectedItem = MiniMapStyles.Items.Cast<ListBoxItem>().FirstOrDefault(i => (string)i.Tag == s.MiniMapMode) ?? MiniMapStyles.Items[0];
-        foreach (var (tag, text) in new[] { ("TopRight", "Top right"), ("TopCenter", "Top centre"), ("OverGame", "Over the game's minimap (experimental)") })
+        foreach (var (tag, text) in new[] { ("TopRight", "Top right"), ("TopCenter", "Top center"), ("OverGame", "Over the game's minimap (experimental)") })
             MiniMapCorner.Items.Add(new ComboBoxItem { Content = Lang.T(text), Tag = tag });
         MiniMapCorner.SelectedItem = MiniMapCorner.Items.Cast<ComboBoxItem>().FirstOrDefault(i => (string)i.Tag == s.MiniMapCorner) ?? MiniMapCorner.Items[0];
         MiniMapSize.Value = s.MiniMapSize;

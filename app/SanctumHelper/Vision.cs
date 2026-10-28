@@ -19,7 +19,7 @@ public sealed class MapArt : IDisposable
 {
     public Mat Gray { get; }
     public Mat Alpha { get; }
-    /// <summary>Colour art on the map's dark background (made on first use).</summary>
+    /// <summary>Color art on the map's dark background (made on first use).</summary>
     public Mat Bgr => bgr ??= MakeBgr();
     Mat? bgr;
     readonly string path;
@@ -484,7 +484,7 @@ public sealed class MinimapTracker(MapArtCache arts)
     /// is ambiguous when a layout repeats room shapes; a local search from a known spot isn't.</summary>
     public void Seed(Point2d pos) { last = pos; vel = default; seededAt = filterTime = DateTime.UtcNow; }
 
-    /// <summary>Coloured parts of map icons (blue/cyan doors and eggs, orange door), dilated.</summary>
+    /// <summary>Colored parts of map icons (blue/cyan doors and eggs, orange door), dilated.</summary>
     public static Mat IconMask(Mat hsv, int margin)
     {
         var m = new Mat();
@@ -513,7 +513,7 @@ public sealed class MinimapTracker(MapArtCache arts)
         return small;
     });
 
-    /// <summary>minimapBgr is the square crop centred on the player arrow; uiScale is the
+    /// <summary>minimapBgr is the square crop centered on the player arrow; uiScale is the
     /// client height / 1080. Returns the player's position in map-art pixels.</summary>
     public Point2d? Locate(Mat minimapBgr, Layout layout, double uiScale)
     {
@@ -549,7 +549,7 @@ public sealed class MinimapTracker(MapArtCache arts)
         Cv2.InRange(hsv, new Scalar(0, 0, cut + 1), new Scalar(180, 40, 255), floor8);
         // Some rooms have tan/beige floors: warm hue, moderate saturation (the orange door icon
         // and the yellow arrow are far more saturated). Warm-lit 3D world behind the minimap
-        // has the same colours, but it is textured while the minimap's floor is flat, so tan
+        // has the same colors, but it is textured while the minimap's floor is flat, so tan
         // only counts where the brightness barely varies (local std < 10).
         using var tan = new Mat();
         Cv2.InRange(hsv, new Scalar(5, 0, Math.Max(cut, 110) + 1), new Scalar(30, 95, 255), tan);
@@ -740,7 +740,7 @@ public sealed class MinimapTracker(MapArtCache arts)
 public sealed class DoorLocator(MapArtCache arts, Mat? header, Mat? orangeIcon = null, Mat? blueIcon = null)
 {
     /// <summary>Finds a door icon by matching the icon as the game draws it (cropped from 1080p
-    /// screenshots). Colour blobs alone confuse the blue door with the light-blue egg and
+    /// screenshots). Color blobs alone confuse the blue door with the light-blue egg and
     /// intrigue marks. Real doors score 0.84-1.0 (even half covered), anything else < 0.6.</summary>
     /// <param name="half">The frame at half the 1080p-equivalent size; tpl the icon at that size.</param>
     /// <param name="hx">Where the game's UI area starts (1080p px; > 0 on ultrawide screens).</param>
@@ -778,7 +778,7 @@ public sealed class DoorLocator(MapArtCache arts, Mat? header, Mat? orangeIcon =
     /// <summary>The map screen is known to be closed (from its title corner alone): as Match would leave things.</summary>
     public void MarkClosed() { LastOrange = LastBlue = null; LastMapOpen = false; LastInfo = "map not open"; }
 
-    /// <summary>The full map screen's title icon (top-left), so door-coloured things in normal
+    /// <summary>The full map screen's title icon (top-left), so door-colored things in normal
     /// gameplay are never mistaken for the map.</summary>
     /// <param name="hx">Where the game's UI area starts in small1080 (1080p px; > 0 on ultrawide screens).</param>
     public bool IsMapOpen(Mat small1080, int hx = 0)
@@ -805,7 +805,7 @@ public sealed class DoorLocator(MapArtCache arts, Mat? header, Mat? orangeIcon =
     /// doors point the same way (Normal 56/58/60 are all due east).</summary>
     const double DefaultScale = 0.632;
 
-    /// <summary>Centre of the biggest blob of a colour, with its area, in frame pixels.</summary>
+    /// <summary>Center of the biggest blob of a color, with its area, in frame pixels.</summary>
     static (Point2d c, int area)? Blob(Mat hsv, Scalar lo, Scalar hi, int minArea, int maxArea, Rect? exclude = null)
     {
         using var m = new Mat();
@@ -870,7 +870,7 @@ public sealed class DoorLocator(MapArtCache arts, Mat? header, Mat? orangeIcon =
             b = Blob(hsv, BlueLo, BlueHi, 30, 2500, hud);
         }
         // The game anchors map icons near their bottom edge: the door is ~11 px (1080p) below
-        // the icon's colour centre (measured by floor matching on three map screenshots).
+        // the icon's color center (measured by floor matching on three map screenshots).
         const double IconAnchorY = 11;
         if (o != null) o = (new Point2d(o.Value.c.X, o.Value.c.Y + IconAnchorY), o.Value.area);
         if (b != null) b = (new Point2d(b.Value.c.X, b.Value.c.Y + IconAnchorY), b.Value.area);
@@ -1150,8 +1150,8 @@ public sealed class FloorRefiner(MapArtCache arts)
 /// grayscale matching works (measured 0.73 at the right entrance on a live frame).</summary>
 public sealed class IslandTracker(MapArtCache arts)
 {
-    // Colour matching: the island art's colours (grass, sand, sea, paths) are what make places
-    // tell apart; greyscale lost to the view cone in rainy green views (0.56 vs 0.60 in colour).
+    // Color matching: the island art's colors (grass, sand, sea, paths) are what make places
+    // tell apart; greyscale lost to the view cone in rainy green views (0.56 vs 0.60 in color).
     const double SearchWork = 0.35, TrackWork = 0.7;
     // The island minimap is always drawn at 1.2x the map art: 504 of ~580 logged fixes were at
     // 1.20, and the 1.10 / 1.30 ones were look-alike places. Only that zoom is searched.
@@ -1189,7 +1189,7 @@ public sealed class IslandTracker(MapArtCache arts)
         double work = tracking && scale != null ? TrackWork : SearchWork;
         using var small = new Mat();
         Cv2.Resize(minimapBgr, small, new Size(), work / uiScale, work / uiScale, InterpolationFlags.Area);
-        var gray = small; // colour template (the name is kept from the greyscale version)
+        var gray = small; // color template (the name is kept from the greyscale version)
         using var hsv = new Mat();
         Cv2.CvtColor(small, hsv, ColorConversionCodes.BGR2HSV);
         using var mask = new Mat(small.Size(), MatType.CV_8U, Scalar.Black);
@@ -1198,11 +1198,11 @@ public sealed class IslandTracker(MapArtCache arts)
         Cv2.Circle(mask, c, r, Scalar.White, -1);
         Cv2.Circle(mask, c, Math.Max(5, r / 4), Scalar.Black, -1); // the player arrow / egg marker
         // Not the Sanctum's icon filter: it blanks blue/cyan, which on the island is the sea,
-        // the very thing that makes shores and docks recognisable.
+        // the very thing that makes shores and docks recognizable.
         using (var icons = new Mat())
         using (var vivid = new Mat())
         {
-            Cv2.InRange(hsv, new Scalar(0, 121, 91), new Scalar(180, 255, 255), vivid); // icons: vivid colours
+            Cv2.InRange(hsv, new Scalar(0, 121, 91), new Scalar(180, 255, 255), vivid); // icons: vivid colors
             using var k5 = Cv2.GetStructuringElement(MorphShapes.Rect, new Size(Math.Max(3, (int)(9 * work)), Math.Max(3, (int)(9 * work))));
             Cv2.Dilate(vivid, icons, k5);
             // The white view cone (and weather icon): near-white pixels. Measured on rainy and
@@ -1350,7 +1350,7 @@ public sealed class IslandTracker(MapArtCache arts)
 }
 
 /// <summary>Which way the player faces, read from the minimap's arrow: the game's own arrow
-/// sprite (points north) is rotated in steps and matched at the minimap centre. Measured on
+/// sprite (points north) is rotated in steps and matched at the minimap center. Measured on
 /// live frames: best fit 0.81-0.91 at 0.40x sprite size at 1080p.</summary>
 /// <summary>Finds the game's own map icons (portal doors, the Egg Boat, the egg marker) on the
 /// minimap, using the sprites with their transparency as the mask.</summary>
@@ -1404,7 +1404,7 @@ public sealed class HeadingDetector
 {
     static List<(Mat tpl, Mat mask, MaskedTemplate match)>? eggTemplates;
 
-    /// <summary>How much the minimap's centre looks like the egg marker the game shows instead of
+    /// <summary>How much the minimap's center looks like the egg marker the game shows instead of
     /// the arrow while the player is twined with an egg (0-1). Two crops of the real marker (one
     /// over Sanctum floor, one over the island), the better one counts; the player-number badge on
     /// its lower right changes with the player, so it is left out of the comparison.</summary>
@@ -1422,8 +1422,8 @@ public sealed class HeadingDetector
             return (t, m, t.Empty() ? null! : new MaskedTemplate(t, m));
         }).Where(x => !x.t.Empty()).ToList();
         if (eggTemplates.Count == 0) return 0;
-        // Only right at the centre, where the player's own marker sits (an egg lying nearby shows
-        // the same marker a little off-centre), at 1080p scale (the template's).
+        // Only right at the center, where the player's own marker sits (an egg lying nearby shows
+        // the same marker a little off-center), at 1080p scale (the template's).
         int half = (int)((15 + 12) * uiScale);
         var c = new Point(minimapBgr.Width / 2, minimapBgr.Height / 2);
         var roi = new Rect(c.X - half, c.Y - half, 2 * half, 2 * half).Intersect(new Rect(0, 0, minimapBgr.Width, minimapBgr.Height));
@@ -1567,7 +1567,7 @@ public sealed class HeadingDetector
         return FromViewConeCentroid(minimapBgr, uiScale, out confidence);
     }
 
-    /// <summary>The previous reader: the brightness-weighted centre of the brightest 72-degree arc, at half
+    /// <summary>The previous reader: the brightness-weighted center of the brightest 72-degree arc, at half
     /// resolution. Kept as the fallback, and for comparing the two (--cone-replay writes both).</summary>
     public static double? FromViewConeCentroid(Mat minimapBgr, double uiScale, out double confidence)
     {
@@ -1578,7 +1578,7 @@ public sealed class HeadingDetector
         const int Bins = 90; // 4 deg
         // Which 4-degree slice each pixel of the ring near the player falls in: worked out once per size.
         var prof = ConeProfile(small, Bins);
-        // The best ~72 deg arc, then its brightness-weighted centre.
+        // The best ~72 deg arc, then its brightness-weighted center.
         const int Win = 18;
         int best = 0; double bestSum = -1;
         for (int i = 0; i < Bins; i++)
@@ -1626,13 +1626,13 @@ public sealed class HeadingDetector
     }
 
     /// <summary>Degrees clockwise from north, or null. minimapBgr is the square minimap crop
-    /// (centred on the arrow) at any resolution; uiScale = client height / 1080.</summary>
+    /// (centered on the arrow) at any resolution; uiScale = client height / 1080.</summary>
     /// <param name="hint">The heading a moment ago: then only ±22.5° around it is searched (a
     /// third of the matches), with the full circle as the fallback.</param>
     public double? Detect(Mat minimapBgr, double uiScale, double? hint = null)
     {
         if (bank.Count == 0) return null;
-        // The arrow sits in the middle: a 48 px (1080p) square around the centre is enough.
+        // The arrow sits in the middle: a 48 px (1080p) square around the center is enough.
         int half = (int)(24 * uiScale);
         var c = new Point(minimapBgr.Width / 2, minimapBgr.Height / 2);
         var roi = new Rect(c.X - half, c.Y - half, half * 2, half * 2).Intersect(new Rect(0, 0, minimapBgr.Width, minimapBgr.Height));

@@ -114,6 +114,8 @@ public sealed class Hosted
         switch (cmd.GetProperty("command").GetString())
         {
             case "new-run": engine.ResetRun(); break;
+            // the app turns Sanctum Helper off: close the normal way (settings and logs saved), not killed
+            case "quit": System.Windows.Application.Current.Dispatcher.BeginInvoke(() => System.Windows.Application.Current.Shutdown()); break;
             case "position-map": app.BeginMiniMapPlacement(); break;
             case "capture-key": capturing = "key"; captureStarted = DateTime.UtcNow; break;
             case "capture-pad": CapturePad(); break;

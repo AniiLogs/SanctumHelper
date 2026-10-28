@@ -59,7 +59,7 @@ public sealed class Settings
     /// game's own minimap, opaque. The game's minimap is still read underneath: window capture never sees overlays,
     /// and with screen pictures (Desktop Duplication) the overlay is hidden from capture.</summary>
     public string MiniMapCorner { get; set; } = "TopRight";
-    /// <summary>Where the user dragged the on-screen map: its centre as a share of the game's
+    /// <summary>Where the user dragged the on-screen map: its center as a share of the game's
     /// width and height (so it survives resolution changes). Null = the default spot.</summary>
     public double? MiniMapX { get; set; }
     public double? MiniMapY { get; set; }
@@ -94,7 +94,7 @@ public sealed class Settings
 
     // Screen regions as fractions of a 16:9 reference frame (1920x1080), see Regions.cs.
     public RegionF PartyGoalRegion { get; set; } = new(740, 6, 400, 54);
-    /// <summary>Square centred on the minimap's player arrow (top-left of the HUD).</summary>
+    /// <summary>Square centered on the minimap's player arrow (top-left of the HUD).</summary>
     public RegionF MinimapRegion { get; set; } = new(75, 32, 210, 210);
 
     public static string Dir => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "SanctumHelper");

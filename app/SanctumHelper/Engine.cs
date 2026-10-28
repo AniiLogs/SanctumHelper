@@ -154,7 +154,7 @@ public sealed class Engine : IDisposable
     public string? OcrMissingLanguage => ocr.MissingLanguage;
     /// <summary>The game's own language setting changed (with the game language on Auto).</summary>
     public event Action? LanguageDetected;
-    /// <summary>A short notice for the player: text, and the difficulty it's about (for its colour;
+    /// <summary>A short notice for the player: text, and the difficulty it's about (for its color;
     /// null for a Sanctum).</summary>
     public event Action<string, string?>? Notify;
     public string? DetectedDifficulty { get; private set; }
@@ -503,7 +503,7 @@ public sealed class Engine : IDisposable
     long sharedCornerAt, sharedCornerSeq, trackedCornerSeq;
 
     /// <summary>The HUD corner: the minimap, the Esc button and the run timer below them. It starts at the left
-    /// edge of the game's UI area (440 px in on a 3440x1440 window: the UI is a centred 16:9 box there).</summary>
+    /// edge of the game's UI area (440 px in on a 3440x1440 window: the UI is a centered 16:9 box there).</summary>
     static Rect CornerRect(Rect rc, Rect client)
     {
         var hud = Regions.Hud(client.Width, client.Height);
@@ -573,7 +573,7 @@ public sealed class Engine : IDisposable
             headingTime = now;
         }
         // Twined with an egg: no arrow, and the egg marker right where the arrow would be (an egg
-        // lying nearby sits off-centre with the arrow still showing). Measured: twined 0.75-0.85,
+        // lying nearby sits off-center with the arrow still showing). Measured: twined 0.75-0.85,
         // nearby egg <= 0.44 (arrow shown), normal minimaps <= 0.50.
         if (h == null || !headingFromArrow)
         {
@@ -622,7 +622,7 @@ public sealed class Engine : IDisposable
             Velocity: onIsland ? islandTracker.Velocity : minimap.Velocity, Stamp: when, Camera: CurrentCamera));
     }
 
-    /// <summary>Key held with the in-game map closed: a big map centred on the player, following
+    /// <summary>Key held with the in-game map closed: a big map centered on the player, following
     /// them live (Sanctum only).</summary>
     void ShowBig()
     {
@@ -1061,7 +1061,7 @@ public sealed class Engine : IDisposable
     DateTime lastLandmarkAt;
 
     /// <summary>The player's island position from a Sanctum exit-portal icon on the minimap: its
-    /// offset from the centre (1.2 minimap px per map px) back from that portal's place. Of the
+    /// offset from the center (1.2 minimap px per map px) back from that portal's place. Of the
     /// five portals, the one that fits the last known position (they are 800+ px apart).</summary>
     Point2d? IslandLandmark(Mat mm, double ui, Layout isl)
     {
@@ -1128,7 +1128,7 @@ public sealed class Engine : IDisposable
     void UpdateInRun(Mat small)
     {
         // Compared on brightness only (HSV value): the timer turns red under 3 minutes, and red
-        // and white are the same brightness (measured: red 0.56-0.77 in colour, 0.92-0.99 here).
+        // and white are the same brightness (measured: red 0.56-0.77 in color, 0.92-0.99 here).
         if (timerTemplate == null)
             using (var t = Cv2.ImRead(System.IO.Path.Combine(db.Root, "icons", "hud_timer.png")))
                 timerTemplate = t.Empty() ? new Mat() : ValueChannel(t);
@@ -1153,7 +1153,7 @@ public sealed class Engine : IDisposable
                 Cv2.MatchTemplate(v, timerTemplate, res, TemplateMatchModes.CCoeffNormed);
                 Cv2.MinMaxLoc(res, out _, out double max, out _, out _);
                 // Under 3 minutes the stopwatch becomes a red disc with a white running figure:
-                // same brightness inside, so that one is matched in colour, inside its circle.
+                // same brightness inside, so that one is matched in color, inside its circle.
                 if (max < 0.7 && redTimer is { } red && !red.tpl.Empty())
                 {
                     using var area2 = new Mat(small, area);
@@ -1383,7 +1383,7 @@ public sealed class Engine : IDisposable
 
     static Mat PanImage(Mat frame)
     {
-        // Centre of the screen only: the map's title, zoom bar and edges don't move with a pan.
+        // Center of the screen only: the map's title, zoom bar and edges don't move with a pan.
         var roi = new Rect(frame.Width / 8, frame.Height / 8, frame.Width * 3 / 4, frame.Height * 3 / 4);
         using var crop = new Mat(frame, roi);
         using var g = new Mat();

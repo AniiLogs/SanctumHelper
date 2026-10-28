@@ -248,7 +248,7 @@ public sealed class OverlayWindow : Window
 
     void OnWheel(object sender, System.Windows.Input.MouseWheelEventArgs e)
     {
-        // Resize around the panel's centre (the stored position is the centre).
+        // Resize around the panel's center (the stored position is the center).
         if (settings.MiniMapX == null)
         {
             var c = view.PlacementClient;
@@ -477,7 +477,7 @@ public sealed class OverlayView : FrameworkElement
             return;
         }
 
-        // Placement: aligned to the in-game map when found, otherwise a centred panel.
+        // Placement: aligned to the in-game map when found, otherwise a centered panel.
         double scale, tx, ty;
         bool aligned = f.Pose != null;
         var layout = f.Pose?.Layout ?? f.Layout;
@@ -535,7 +535,7 @@ public sealed class OverlayView : FrameworkElement
         ("Disc", "Round minimap", "A round map that turns with you, so up is always the way you face."),
         ("Radar", "Radar", "Just the doors, key rooms and nests around you on a faint outline, with arrows and distances to the ones out of range."),
         ("Compass", "Compass strip", "A strip along the top of the screen showing which way, and how far, the doors, key rooms and nests are."),
-        ("Overlay", "See-through (Diablo)", "Faint wall outlines over the middle of the screen, centred on your character."),
+        ("Overlay", "See-through (Diablo)", "Faint wall outlines over the middle of the screen, centered on your character."),
         ("Off", "Off", "No on-screen map while the full map is closed."),
     ];
 
@@ -551,7 +551,7 @@ public sealed class OverlayView : FrameworkElement
     public Rect CancelButton { get; private set; }
 
     /// <summary>The style actually drawn: the see-through style doesn't work on the busy,
-    /// full-colour island art (corner map there), and placing shows a panel to drag.</summary>
+    /// full-color island art (corner map there), and placing shows a panel to drag.</summary>
     public string MiniStyle(OverlayFrame f, Layout L)
     {
         if (f.Big) return "Big";
@@ -576,13 +576,13 @@ public sealed class OverlayView : FrameworkElement
     }
 
     /// <summary>Where the panel goes: the user's spot if they placed it, else the default (top
-    /// right, clear of the party portraits, or top centre). Always kept on screen and off the
+    /// right, clear of the party portraits, or top center). Always kept on screen and off the
     /// game's own minimap and quest text in the top-left corner.</summary>
     public Rect MiniPanel(string style, double clientW, double clientH, double ui)
     {
         if (CoversGameMap(style))
         {
-            // exactly over the game's minimap (where it's read from), as a square around its centre
+            // exactly over the game's minimap (where it's read from), as a square around its center
             var m = Regions.ToClient(settings.MinimapRegion, Anchor.TopLeft, (int)clientW, (int)clientH);
             double side = Math.Max(m.Width, m.Height);
             return new Rect(m.X + m.Width / 2.0 - side / 2, m.Y + m.Height / 2.0 - side / 2, side, side);
@@ -594,7 +594,7 @@ public sealed class OverlayView : FrameworkElement
         else
         {
             // Clear of the party portraits at the right edge of the game's UI area (not the window's: on 21:9 the
-            // UI is a centred 16:9 box).
+            // UI is a centered 16:9 box).
             var hud = Regions.Hud((int)clientW, (int)clientH);
             double x = settings.MiniMapCorner == "TopCenter" ? (clientW - sz.Width) / 2 : hud.Right - sz.Width - 240 * ui;
             c = new Point(x + sz.Width / 2, 105 * ui + sz.Height / 2);
@@ -633,7 +633,7 @@ public sealed class OverlayView : FrameworkElement
             new OpenCvSharp.Point2d(at[0] + 40, at[1] + 30), true, null, "", Mini: true, Heading: 35);
     }
 
-    /// <summary>On-screen map while the full map is closed, centred on the player: one of
+    /// <summary>On-screen map while the full map is closed, centered on the player: one of
     /// MiniMapStyles, or the big zoom map while the key is held.</summary>
     void RenderMini(DrawingContext dc, OverlayFrame f, Layout L, OpenCvSharp.Point2d me, double ui)
     {
@@ -657,7 +657,7 @@ public sealed class OverlayView : FrameworkElement
         switch (style)
         {
             case "Overlay":
-                // The character stands a little below the screen centre in the game's camera.
+                // The character stands a little below the screen center in the game's camera.
                 RenderSeeThrough(dc, f, L, me, new Point(f.Client.Width / 2.0, f.Client.Height * 0.56), scale, ms, ui);
                 break;
             case "Disc": RenderDisc(dc, f, L, me, panel, scale, ms, ui); break;
@@ -954,7 +954,7 @@ public sealed class OverlayView : FrameworkElement
         Label(dc, string.Join("  ·  ", parts), at, DifficultyColor(f.Difficulty), 13 * ui, above);
     }
 
-    /// <summary>Caption colour: the difficulty's, so it reads at a glance.</summary>
+    /// <summary>Caption color: the difficulty's, so it reads at a glance.</summary>
     public static Color DifficultyColor(string? d) => d switch
     {
         "Normal" => Color.FromRgb(0x9B, 0xE8, 0x8F),
@@ -1016,7 +1016,7 @@ public sealed class OverlayView : FrameworkElement
         // Everything below uses the game's own map-mark icons (Assets/icons, from the game files).
         double icon = 36 * ms;
 
-        // Key rooms: frame the whole room (its square, from the game data) in the colour of the
+        // Key rooms: frame the whole room (its square, from the game data) in the color of the
         // key its locked door takes, and put the game's key mark on that door.
         var keyRooms = L.KeyRooms.Select(r => r.Id).ToHashSet();
         if (settings.Layer("key"))
@@ -1137,7 +1137,7 @@ public sealed class OverlayView : FrameworkElement
         return Icons[name] = bmp;
     }
 
-    /// <summary>Draws an icon centred on c, fitted into a size x size box.</summary>
+    /// <summary>Draws an icon centered on c, fitted into a size x size box.</summary>
     static readonly Brush Disc = Freeze(new SolidColorBrush(Color.FromArgb(225, 24, 27, 40)));
     static readonly Pen DiscRing = Freeze(new Pen(new SolidColorBrush(Color.FromArgb(150, 255, 255, 255)), 1.2));
     static T Freeze<T>(T f) where T : Freezable { f.Freeze(); return f; }
@@ -1145,7 +1145,7 @@ public sealed class OverlayView : FrameworkElement
     /// turned back by this much so they stay upright.</summary>
     [ThreadStatic] static double spin;
 
-    /// <summary>Draws an icon centred on c, fitted into a size x size box. Icons without their
+    /// <summary>Draws an icon centered on c, fitted into a size x size box. Icons without their
     /// own backing sit on a dark disc, like the game's map marks.</summary>
     static void Icon(DrawingContext dc, string name, Point c, double size, double opacity = 1)
     {
@@ -1257,7 +1257,7 @@ public sealed class OverlayView : FrameworkElement
         double w = 0, h = 0;
         var fts = lines.Select(l => new FormattedText(l.Item1, CultureInfo.InvariantCulture, FlowDirection.LeftToRight, Face, size, new SolidColorBrush(l.Item2), 1.0)).ToList();
         foreach (var ft in fts) { w = Math.Max(w, ft.Width); h += ft.Height + 3 * ui; }
-        // Top centre: the game's map keeps its title top-left and zoom bar on the left.
+        // Top center: the game's map keeps its title top-left and zoom bar on the left.
         double x = Preview ? 22 * ui : (f.Client.Width - w) / 2;
         dc.DrawRoundedRectangle(new SolidColorBrush(Color.FromArgb(185, 10, 12, 20)), null, new Rect(x - 12 * ui, y - 8 * ui, w + 24 * ui, h + 14 * ui), 10, 10);
         foreach (var ft in fts) { dc.DrawText(ft, new Point(x, y)); y += ft.Height + 3 * ui; }
