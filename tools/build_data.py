@@ -58,9 +58,12 @@ def data_dir(game):
 def bundle_files(game, ui=False):
     """The install's asset bundles: the ones shipped in StreamingAssets, then the ones the game
     downloaded (CacheBundleFiles, hashed names), so a downloaded copy of an asset wins.
-    ui=True keeps only the shipped UI bundles (ar_xgui_*: map tiles, icons)."""
+    ui=True keeps only the shipped UI bundles: ar_xgui_* (one folder each, e.g. the island's tiles) and
+    mres_xgui_* (folders grouped together, e.g. the Lost Sanctum map tiles as of 3846247)."""
     d = data_dir(game)
-    shipped = glob.glob(os.path.join(d, "StreamingAssets", "cvs", "res", "uab", "win", "DefaultPackage", "ar_xgui_*.uab" if ui else "*.uab"))
+    base = os.path.join(d, "StreamingAssets", "cvs", "res", "uab", "win", "DefaultPackage")
+    pats = ("ar_xgui_*.uab", "mres_xgui_*.uab") if ui else ("*.uab",)
+    shipped = [p for pat in pats for p in glob.glob(os.path.join(base, pat))]
     cached = glob.glob(os.path.join(d, "cvs", "res", "uab", "win", "DefaultPackage", "CacheBundleFiles", "*", "*", "*.uab"))
     return sorted(shipped) + sorted(cached)
 
