@@ -8,16 +8,13 @@ Read-only on the install. Writes build/maps/<layer key>.png (e.g. 20032.png,
 import argparse, collections, glob, json, os, re, sys
 import UnityPy
 from PIL import Image
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from build_data import bundle_files  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 # Lost Sanctum layouts, plus 3005 = the Egg Heist team-mode island around them.
-SCENES = list(range(20031, 20061)) + [3005]
-
-
-def bundles(game):
-    root = os.path.join(game, "game", "Aniimo_Data", "cvs", "res", "uab", "win", "DefaultPackage", "CacheBundleFiles")
-    return glob.glob(os.path.join(root, "*", "*", "*.uab"))
+SCENES = list(range(20031, 20100)) + [3005]
 
 
 def main():
@@ -27,7 +24,7 @@ def main():
     ap.add_argument("--out", default=os.path.join(ROOT, "build", "maps"))
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
-    cands = bundles(a.game)
+    cands = bundle_files(a.game, ui=True)
     if a.index:
         idx = json.load(open(a.index, encoding="utf8"))
         cands = [b for b in cands if any(("MapRes/Texture/200" in p or "MapRes/Texture/3005" in p) for p in idx.get(b, {}).get("ui", []))] or cands

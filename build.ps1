@@ -1,6 +1,7 @@
 # Builds dist\SanctumHelper-Setup-<version>.exe
 #   .\build.ps1              package the app with the current Assets
-#   .\build.ps1 -GameData    first re-extract maps + layouts from the Aniimo install (after a game patch)
+#   .\build.ps1 -GameData    first re-extract maps + layouts from the Aniimo install (after a game patch;
+#                            -Game is the launcher's install or Steam's steamapps\common\Aniimo)
 param([switch]$GameData, [string]$Game = "D:\PawPrint\Aniimo")
 $ErrorActionPreference = "Stop"
 $root = $PSScriptRoot
