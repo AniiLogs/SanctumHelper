@@ -4,8 +4,10 @@ Read-only on the install.
 
     python tools/extract_icons.py [--game D:/PawPrint/Aniimo] [--index cached_bundle_index.json]
 """
-import argparse, glob, json, os
+import argparse, json, os, sys
 import UnityPy
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from build_data import bundle_files  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -35,8 +37,7 @@ def main():
     ap.add_argument("--out", default=os.path.join(ROOT, "app", "SanctumHelper", "Assets", "icons"))
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
-    root = os.path.join(a.game, "game", "Aniimo_Data", "cvs", "res", "uab", "win", "DefaultPackage", "CacheBundleFiles")
-    bundles = glob.glob(os.path.join(root, "*", "*", "*.uab"))
+    bundles = bundle_files(a.game, ui=True)
     if a.index:
         idx = json.load(open(a.index, encoding="utf8"))
         keep = [b for b in bundles if any(os.path.basename(p)[:-4] in ICONS.values() for p in idx.get(b, {}).get("ui", []))]

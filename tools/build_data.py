@@ -1,17 +1,22 @@
 """Build the app's layout database from the Aniimo install (read-only).
 
 Writes app/SanctumHelper/Assets/layouts.json and copies the stitched map images
-(build/maps, made by extract_maps.py) next to it.
+(build/maps, made by extract_maps.py) next to it. A layout whose art isn't in build/maps (the
+game downloads Sanctum map art in-game, so a fresh install may not have it) keeps the art
+already in Assets/maps if its map transform hasn't changed; otherwise it is left out and listed
+under "missingArt" until its art can be extracted.
 
     python tools/extract_maps.py
     python tools/build_data.py [--game D:/PawPrint/Aniimo]
 
-Facts this relies on (checked against the game, 2026-10-24, data patch 3746914):
+Facts this relies on (checked against the game, 2026-10-29, data patch 3846247):
 - Team-mode Egg Heist is rob_egg_born_data[3005]. DungeonList[2..5] are the
-  layout pools for Normal, Hard, Nightmare, Chaos ("Layout NN" = scene 200NN).
+  layout pools for Normal, Hard, Nightmare, Chaos ("Layout NN" = scene 200NN,
+  20031..20062 as of 3846247).
 - Scene.<id>.scene_room_data lists the rooms: roomType 3 = orange door (start),
   4 = blue door, 2 = corridor, 6 = Limited-Time Challenge (octagonal room),
-  prefabs ending in _Key = gold key rooms.
+  prefabs ending in _Key = gold key rooms, Level_Room_30_BOSS = boss room
+  (also roomType 3, new in 3846247).
 - Room contents live in the room-template scene 10000: sandbox -> spawner ->
   entity, with positions local to the room prefab (rotated by the room's yaw).
 - scene_data[<id>] maps world (x, z) to the 2048x2048 map image with two
@@ -27,6 +32,7 @@ from bdd import Bdd, Table  # noqa: E402
 
 DIFFICULTIES = {2: "Normal", 3: "Hard", 4: "Nightmare", 5: "Chaos"}  # 2 is "Normal" in the game's UI
 MODE = "3005"
+SANCTUMS = range(20031, 20100)  # team-mode Lost Sanctum scenes (20100 and up are other modes)
 
 # chest id (rob_egg_chest_data) -> marker kind shown in the app
 KIND_BY_CHEST = {
@@ -40,12 +46,41 @@ KIND_BY_CHEST = {
 }
 
 
+def data_dir(game):
+    """Aniimo_Data of an install: the launcher's <game>/game/Aniimo_Data or Steam's <game>/Aniimo_Data."""
+    for rel in ("game/Aniimo_Data", "Aniimo_Data", "."):
+        p = os.path.join(game, rel)
+        if os.path.isdir(os.path.join(p, "cvs")) or os.path.isdir(os.path.join(p, "StreamingAssets")):
+            return os.path.normpath(p)
+    sys.exit("Aniimo_Data not found under " + game)
+
+
+def bundle_files(game, ui=False):
+    """The install's asset bundles: the ones shipped in StreamingAssets, then the ones the game
+    downloaded (CacheBundleFiles, hashed names), so a downloaded copy of an asset wins.
+    ui=True keeps only the shipped UI bundles (ar_xgui_*: map tiles, icons)."""
+    d = data_dir(game)
+    shipped = glob.glob(os.path.join(d, "StreamingAssets", "cvs", "res", "uab", "win", "DefaultPackage", "ar_xgui_*.uab" if ui else "*.uab"))
+    cached = glob.glob(os.path.join(d, "cvs", "res", "uab", "win", "DefaultPackage", "CacheBundleFiles", "*", "*", "*.uab"))
+    return sorted(shipped) + sorted(cached)
+
+
 def find_xdf(game):
-    for rel in ("game/Aniimo_Data/cvs/res/lua", "game/Aniimo_Data/StreamingAssets/cvs/res/lua"):
-        p = os.path.join(game, rel, "LuaScripts.xdf")
+    d = data_dir(game)
+    for rel in ("cvs/res/lua", "StreamingAssets/cvs/res/lua"):
+        p = os.path.join(d, rel, "LuaScripts.xdf")
         if os.path.exists(p):
             return p
     sys.exit("LuaScripts.xdf not found under " + game)
+
+
+def game_build(xdf):
+    """The data patch number, from LuaCacheVer.txt next to the xdf ("1.1.3846247,...")."""
+    try:
+        v = open(os.path.join(os.path.dirname(xdf), "LuaCacheVer.txt"), encoding="utf8").read().split(",")[0]
+        return v.rsplit(".", 1)[-1]
+    except (OSError, IndexError):
+        return os.path.basename(os.path.dirname(xdf))
 
 
 class Text:
@@ -146,7 +181,7 @@ def main():
     b = Bdd(zf.read("xfs/luascripts/Common/Data/pmdata.bin"))
     r = b.root()
     T = Text(zf)
-    version = os.path.basename(os.path.dirname(xdf))
+    version = game_build(xdf)
 
     born = py(r["rob_egg_born_data"])[int(MODE)] if int(MODE) in r["rob_egg_born_data"] else py(r["rob_egg_born_data"])[MODE]
     pools = born["DungeonList"]
@@ -196,7 +231,7 @@ def main():
         return out
 
     layouts = []
-    for sc in range(20031, 20061):
+    for sc in SANCTUMS:
         name = f"Scene.{sc}.scene_room_data"
         if name not in r.keys():
             continue
@@ -217,6 +252,8 @@ def main():
             kind = {3: "orange", 4: "blue", 2: "corridor", 6: "challenge"}.get(rm["roomType"], "room")
             if "_Key" in rm["resId"]:
                 kind = "key"
+            elif "_BOSS" in rm["resId"]:
+                kind = "boss"  # 3846247+: boss rooms reuse roomType 3, they aren't a second start door
             ix, iy = to_img(x, z)
             rooms.append({"id": rm["id"], "type": rm["roomType"], "kind": kind, "depth": rm.get("depth"),
                           "prefab": rm["resId"].strip("$").replace(".prefab", ""), "yaw": rm.get("yaw", 0),
@@ -260,6 +297,8 @@ def main():
         blue = next(x for x in rooms if x["kind"] == "blue")
         dx, dz = blue["world"][0] - orange["world"][0], blue["world"][1] - orange["world"][1]
         layers = sorted(os.path.basename(p)[:-4] for p in glob.glob(os.path.join(a.maps, f"{sc}_*.png")))
+        if not os.path.exists(os.path.join(a.maps, f"{sc}.png")):
+            layers = sorted(os.path.basename(p)[:-4] for p in glob.glob(os.path.join(a.out, "maps", f"{sc}_*.png")))
         layouts.append({
             "scene": sc, "layout": sc - 20000, "difficulties": diff_of.get(sc, []),
             "image": f"maps/{sc}.png", "layers": [f"maps/{n}.png" for n in layers],
@@ -272,6 +311,22 @@ def main():
 
     layouts.append(build_island(r, T, a.maps))
 
+    # Art not freshly extracted: keep what Assets/maps has only while it still lines up.
+    try:
+        old = {L["scene"]: L for L in json.load(open(os.path.join(a.out, "layouts.json"), encoding="utf8"))["layouts"]}
+    except (OSError, ValueError, KeyError):
+        old = {}
+    missing = []
+    for L in list(layouts):
+        if os.path.exists(os.path.join(a.maps, os.path.basename(L["image"]))):
+            continue
+        prev = old.get(L["scene"])
+        if prev and prev["worldToImage"] == L["worldToImage"] and os.path.exists(os.path.join(a.out, L["image"])):
+            continue
+        layouts.remove(L)
+        missing.append(L["scene"])
+        print(f"{L['scene']}: no map art" + (" (its map changed)" if prev else "") + f", left out {L['difficulties']}")
+
     os.makedirs(os.path.join(a.out, "maps"), exist_ok=True)
     used = set()
     for L in layouts:
@@ -283,14 +338,14 @@ def main():
                 Image.open(src).convert("RGBA").quantize(colors=256, method=Image.Quantize.FASTOCTREE)                     .save(os.path.join(a.out, "maps", os.path.basename(p)), optimize=True)
                 used.add(p)
     db = {"gameDataVersion": version, "mode": int(MODE), "difficulties": list(DIFFICULTIES.values()),
-          "pools": {name: pools[i] for i, name in DIFFICULTIES.items()}, "layouts": layouts}
+          "pools": {name: pools[i] for i, name in DIFFICULTIES.items()}, "missingArt": missing, "layouts": layouts}
     json.dump(db, open(os.path.join(a.out, "layouts.json"), "w", encoding="utf8"), ensure_ascii=False, indent=1)
     for L in layouts:
         kinds = {}
         for m in L["markers"]:
             kinds[m["kind"]] = kinds.get(m["kind"], 0) + 1
         print(L["layout"], L["difficulties"], L["doorVector"], kinds)
-    print(f"{len(layouts)} layouts, {len(used)} images -> {a.out}")
+    print(f"{len(layouts)} layouts, {len(used)} new images -> {a.out}" + (f"; no art yet: {missing}" if missing else ""))
 
 
 if __name__ == "__main__":
