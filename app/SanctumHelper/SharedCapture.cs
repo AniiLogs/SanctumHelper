@@ -23,6 +23,10 @@ namespace SanctumHelper;
 ///   12 u32 served id, 16 u64 seq (odd while written), 24 u64 picture time, 32 u32 pixel offset from 4096,
 ///   36 u32 stride, 40 u16 x, y, w, h (client pixels), 48 u32 flags, 52 u32 copy microseconds,
 ///   56 u16 client width, height, 60 u8 shrink wanted, 61 u8 shrink used },
+///   1344 u64 clean until (unix ms): a proof is being taken (the meter); overlays stay out of screen captures until then,
+///   1352 overlay windows: 3 x 144 { u64 updated (unix ms), u32 pid, u32 count (<= 8), 8 x i32 x0, y0, x1, y1 screen
+///   px }, owners 0 the meter, 1 Sanctum Helper, 2 the app's button: every reader of a screen copy covers them all,
+///   so overlays can stay in screenshots and recordings (a block not updated for 3 s is stale),
 ///   2048 u64 heartbeat (unix ms) of the app's capture thread,
 ///   4096 the pictures, BGRA, top row first.</summary>
 public static class SharedCapture
@@ -75,6 +79,59 @@ public static class SharedCapture
     /// <summary>The last picture we took may have our overlays in it (flags bit 1: Desktop Duplication), so our
     /// overlay must be hidden from capture.</summary>
     public static bool ScreenCopy { get; private set; }
+
+    const int CleanUntil = 1344, OverlayBase = 1352, OverlayBlock = 144, OverlayMax = 8;
+    const long OverlayStaleMs = 3000;
+    public const int OwnerSanctum = 1;
+
+    /// <summary>A proof is being taken (the meter): our overlays stay out of screen captures meanwhile.</summary>
+    public static bool CleanNow
+    {
+        get { lock (gate) return Open() && NowMs < I64(CleanUntil); }
+    }
+
+    /// <summary>Our overlay windows' spots (screen px), for the meter and the app to cover in their pictures.</summary>
+    public static void PublishOverlays(int owner, System.Collections.Generic.IReadOnlyList<Rect> rects)
+    {
+        lock (gate)
+        {
+            if (!Open()) return;
+            int at = OverlayBase + owner * OverlayBlock, n = Math.Min(OverlayMax, rects.Count);
+            for (int k = 0; k < n; k++)
+            {
+                var r = rects[k];
+                Marshal.WriteInt32(basePtr, at + 16 + 16 * k, r.X); Marshal.WriteInt32(basePtr, at + 20 + 16 * k, r.Y);
+                Marshal.WriteInt32(basePtr, at + 24 + 16 * k, r.Right); Marshal.WriteInt32(basePtr, at + 28 + 16 * k, r.Bottom);
+            }
+            Marshal.WriteInt32(basePtr, at + 8, pid);
+            Marshal.WriteInt32(basePtr, at + 12, n);
+            Marshal.WriteInt64(basePtr, at, NowMs);
+        }
+    }
+
+    /// <summary>Every aLogs overlay's spot now (screen px), ours included: covered in a picture of the screen.</summary>
+    public static System.Collections.Generic.List<Rect> Overlays()
+    {
+        var all = new System.Collections.Generic.List<Rect>();
+        lock (gate)
+        {
+            if (!Open()) return all;
+            long now = NowMs;
+            for (int owner = 0; owner < 3; owner++)
+            {
+                int at = OverlayBase + owner * OverlayBlock;
+                if (now - I64(at) > OverlayStaleMs) continue;
+                int n = (int)Math.Min(OverlayMax, U32(at + 12));
+                for (int k = 0; k < n; k++)
+                {
+                    int x0 = Marshal.ReadInt32(basePtr, at + 16 + 16 * k), y0 = Marshal.ReadInt32(basePtr, at + 20 + 16 * k);
+                    int x1 = Marshal.ReadInt32(basePtr, at + 24 + 16 * k), y1 = Marshal.ReadInt32(basePtr, at + 28 + 16 * k);
+                    if (x1 > x0 && y1 > y0) all.Add(new Rect(x0, y0, x1 - x0, y1 - y0));
+                }
+            }
+        }
+        return all;
+    }
 
     /// <summary>How long the app took to read our last picture off the graphics card (ms).</summary>
     public static double CopyMs { get; private set; }

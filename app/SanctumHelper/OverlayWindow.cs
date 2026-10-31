@@ -46,14 +46,22 @@ public sealed class OverlayWindow : Window
         };
     }
 
-    /// <summary>Visible to recordings when the engine reads the game window, hidden otherwise.</summary>
+    bool? excluded;
+    bool overGame;     // the window spans the game and draws over what's read (big map, Overlay style, over the minimap)
+
+    /// <summary>In screenshots and recordings unless the player hid overlays from them (Recordable overlay off). A map
+    /// panel is covered by every reader of a picture of the screen (OwnOverlays). A map drawn over the game itself
+    /// (the big map, the Overlay style, over the game's minimap) covers what is read, so where the picture is a copy of
+    /// the screen it stays out of it; and every overlay steps out for the moment the meter takes a proof.</summary>
     public void ApplyCaptureMode(bool screenFallback = false)
     {
         forceExclude |= screenFallback;
         if (hwnd == IntPtr.Zero) return;
-        // over the game's minimap (experimental) the map covers what's read: always kept out of the pictures, or a
-        // screen copy (standalone, or the app's Desktop Duplication before its first picture says so) reads it
-        bool exclude = forceExclude || !settings.RecordableOverlay || settings.MiniMapCorner == "OverGame";
+        bool screenCopy = forceExclude || (SharedCapture.InUse && SharedCapture.ScreenCopy);
+        bool exclude = !settings.RecordableOverlay || settings.MiniMapCorner == "OverGame"
+            || (overGame && screenCopy) || SharedCapture.CleanNow;
+        if (excluded == exclude) return;
+        excluded = exclude;
         Native.SetWindowDisplayAffinity(hwnd, exclude ? Native.WDA_EXCLUDEFROMCAPTURE : Native.WDA_NONE);
     }
 
@@ -89,6 +97,10 @@ public sealed class OverlayWindow : Window
             }
         }
         view.Offset = offset;
+        // a panel (want smaller than the game) is a spot others cover; a whole-game window draws over what's read
+        overGame = f.Visible && want == f.Client;
+        OwnOverlays.Set("map", f.Visible && want.Width > 0 && !overGame ? want : null);
+        ApplyCaptureMode();
         if (f.Visible && want.Width > 0 && want != placed)
         {
             placed = want;

@@ -84,16 +84,36 @@ public sealed class ToastWindow : Window
 
     OpenCvSharp.Rect lastClient;
 
+    System.Windows.Threading.DispatcherTimer? gateTimer;
+    bool? excluded;
+
+    /// <summary>In screenshots and recordings unless the player hid overlays from them; out for the moment the meter
+    /// takes a proof (checked 10 times a second while a card shows).</summary>
+    void ApplyCaptureMode()
+    {
+        if (hwnd == IntPtr.Zero) return;
+        bool exclude = !settings.RecordableOverlay || SharedCapture.CleanNow;
+        if (excluded == exclude) return;
+        excluded = exclude;
+        Native.SetWindowDisplayAffinity(hwnd, exclude ? Native.WDA_EXCLUDEFROMCAPTURE : Native.WDA_NONE);
+    }
+
     void Next()
     {
-        if (queue.Count == 0) { showing = false; Hide(); return; }
+        if (queue.Count == 0) { showing = false; gateTimer?.Stop(); OwnOverlays.Set("toast", null); Hide(); return; }
         showing = true;
         var (text, accent) = queue.Dequeue();
         label.Text = text;
         bar.Background = new SolidColorBrush(accent);
 
         if (hwnd == IntPtr.Zero) { base.Show(); Hide(); }
-        Native.SetWindowDisplayAffinity(hwnd, settings.RecordableOverlay ? Native.WDA_NONE : Native.WDA_EXCLUDEFROMCAPTURE);
+        ApplyCaptureMode();
+        if (gateTimer == null)
+        {
+            gateTimer = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromMilliseconds(100) };
+            gateTimer.Tick += (_, _) => { ApplyCaptureMode(); OwnOverlays.Tick(); };
+        }
+        gateTimer.Start();
         // Size and place in physical pixels, at the game's top-right corner.
         var dpi = VisualTreeHelper.GetDpi(this);
         double ui = Regions.Ui(lastClient.Width, lastClient.Height);
@@ -102,6 +122,7 @@ public sealed class ToastWindow : Window
         base.Show();
         Native.SetWindowPos(hwnd, Native.HWND_TOPMOST, lastClient.Right - w, lastClient.Y, w, h,
             Native.SWP_NOACTIVATE | Native.SWP_SHOWWINDOW | Native.SWP_NOOWNERZORDER);
+        OwnOverlays.Set("toast", new OpenCvSharp.Rect(lastClient.Right - w, lastClient.Y, w, h));
 
         // Drop in from above, hold, slide out to the right.
         slide.X = 0;

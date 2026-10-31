@@ -690,6 +690,18 @@ public sealed class Engine : IDisposable
     int windowCaptureMisses;
     long firstCaptureMiss;
 
+    /// <summary>A picture of the screen has every aLogs overlay window in it (they stay in screenshots and recordings):
+    /// covered in black where each one is (SharedCapture.Overlays: ours, the meter's, the app's button), so nothing
+    /// reads them. A map drawn over the game itself isn't listed: that one stays out of screen pictures instead.</summary>
+    static void CoverOverlays(Mat m, Rect client, Rect sub)
+    {
+        foreach (var o in SharedCapture.Overlays())
+        {
+            var r = new Rect(o.X - client.X - sub.X, o.Y - client.Y - sub.Y, o.Width, o.Height) & new Rect(0, 0, m.Width, m.Height);
+            if (r.Width > 0 && r.Height > 0) using (var part = new Mat(m, r)) part.SetTo(Scalar.Black);
+        }
+    }
+
     /// <summary>A part of the game's client area (client coordinates).</summary>
     Mat Grab(Rect sub)
     {
@@ -700,11 +712,15 @@ public sealed class Engine : IDisposable
         if (SharedCapture.AppPresent)
         {
             var shared = SharedCapture.TryGrab(game.Handle, c.Width, c.Height, sub);
-            if (shared != null && SharedCapture.ScreenCopy && !sharedScreenCopy)
+            OwnOverlays.Tick();
+            if (shared != null && SharedCapture.ScreenCopy)
             {
-                sharedScreenCopy = true;
-                Log.Write("the aLogs app shares its Desktop Duplication picture (overlays can be in it): overlay hidden from recordings");
-                CaptureFallback?.Invoke();
+                if (!sharedScreenCopy)
+                {
+                    sharedScreenCopy = true;
+                    Log.Write("the aLogs app shares its Desktop Duplication picture: every aLogs overlay in it is covered before reading");
+                }
+                CoverOverlays(shared, c, sub);
             }
             perfSource = SharedCapture.ScreenCopy ? "shared desktop duplication" : "shared window capture";
             return shared ?? new Mat(Math.Max(1, sub.Height), Math.Max(1, sub.Width), MatType.CV_8UC3, Scalar.Black);
