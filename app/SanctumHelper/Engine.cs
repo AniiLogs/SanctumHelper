@@ -464,7 +464,9 @@ public sealed class Engine : IDisposable
                 // While fast, each fix uses the heading loop's newest corner copy as soon as it lands
                 // (it copies one per desktop frame), at most every 25 ms: ~40 fixes a second, each
                 // ~10 ms. (Was a fix every ~50 ms from a copy up to 60 ms old: up to ~110 ms behind.)
-                if (now >= nextMinimap && settings.TrackMinimap && (!fast || NewCorner || now >= nextMinimap + 40))
+                // Only in Egg Heist (the game log has you on the island or in a Sanctum): out in the world nothing is
+                // shown, and tracking there was 2-3 copies and fixes a second for nothing (a player's lag report, B4)
+                if (now >= nextMinimap && settings.TrackMinimap && InEggHeist && (!fast || NewCorner || now >= nextMinimap + 40))
                 {
                     nextMinimap = now + (fast ? 25 : 350);
                     var t1 = perfClock.ElapsedTicks;
