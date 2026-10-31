@@ -29,6 +29,7 @@ public sealed class GameLog
     public event Action<Place, bool>? Changed;
 
     static readonly Regex Connect = new(@"connect to worldx-[a-z]+-[a-z]+-([a-z]+)-", RegexOptions.Compiled);
+    bool interlink;               // in Interlink's dungeon rooms (see Line)
     static readonly Regex Scene = new(@"createVoxelScene new>>>id:(\S+)", RegexOptions.Compiled);
 
     readonly string path;
@@ -115,11 +116,19 @@ public sealed class GameLog
         if (line.Contains("connect to worldx-") && Connect.Match(line) is { Success: true } c)
         {
             server = c.Groups[1].Value; // ms (login), line, singleworld, dungeon, ...
+            if (server != "dungeon") interlink = false;
+            return;
+        }
+        // Interlink rooms are dungeon areas too: the game names their scene (".._fb_bossrush..") in the same second
+        // the room loads. From then until the next non-dungeon server, nothing is Egg Heist.
+        if (line.Contains("fb_bossrush"))
+        {
+            if (!interlink) { interlink = true; islandId = sanctumId = null; Set(Place.Elsewhere, false); }
             return;
         }
         if (!line.Contains("createVoxelScene") || Scene.Match(line) is not { Success: true } m) return;
         string id = m.Groups[1].Value;
-        if (server != "dungeon")
+        if (server != "dungeon" || interlink)
         {
             islandId = sanctumId = null;
             Set(Place.Elsewhere, false);

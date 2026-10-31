@@ -148,6 +148,15 @@ public sealed class Engine : IDisposable
     bool toggled;
 
     public event Action<OverlayFrame>? Frame;
+
+    /// <summary>Is this an Egg Heist area? With the game's log readable, only while it has the player on the island or
+    /// in a Sanctum: the maps used to pop up elsewhere when something on screen passed for the run timer or the island
+    /// map. A layout picked by hand always shows; without the log, the screen decides as before.</summary>
+    bool InEggHeist => settings.ForcedLayout != 0 || !(settings.UseGameLog && gameLog.Available)
+        || gameLog.Where is GameLog.Place.Island or GameLog.Place.Sanctum;
+
+    /// <summary>Every overlay frame goes out here: nothing is shown outside Egg Heist (see InEggHeist).</summary>
+    void Emit(OverlayFrame f) => Frame?.Invoke(f.Visible && !InEggHeist ? f with { Visible = false } : f);
     public event Action? StatusChanged;
 
     // State shown in the tray tooltip and settings window.
@@ -377,7 +386,7 @@ public sealed class Engine : IDisposable
                 }
                 if (!GameFound)
                 {
-                    if (wasShowing) { Frame?.Invoke(new OverlayFrame(default, false, null, null, null, false, null, "")); wasShowing = false; }
+                    if (wasShowing) { Emit(new OverlayFrame(default, false, null, null, null, false, null, "")); wasShowing = false; }
                     // The game closed for a minute: the run is over, let its maps go (they stayed loaded, 300-500 MB,
                     // until Sanctum Helper itself closed). Only the in-game checks below did this before.
                     gameGoneSince ??= now;
@@ -428,7 +437,7 @@ public sealed class Engine : IDisposable
                 }
                 if (wasShowing)
                 {
-                    Frame?.Invoke(new OverlayFrame(game.Client, false, CurrentLayout, null, null, false, EffectiveDifficulty, ""));
+                    Emit(new OverlayFrame(game.Client, false, CurrentLayout, null, null, false, EffectiveDifficulty, ""));
                     wasShowing = false;
                 }
                 // The party screen is read even with another window in front (e.g. this app's
@@ -642,7 +651,7 @@ public sealed class Engine : IDisposable
         bool fresh = me != null && hudVisible && InRun && (DateTime.UtcNow - when).TotalSeconds < 60;
         if (settings.MiniMapMode == "Off" || layout == null || !fresh) { HideMini(); return; }
         miniShowing = true;
-        Frame?.Invoke(new OverlayFrame(game.Client, true, layout, null, me, true, EffectiveDifficulty, "", Mini: true, Floor: floor, Heading: CurrentHeading,
+        Emit(new OverlayFrame(game.Client, true, layout, null, me, true, EffectiveDifficulty, "", Mini: true, Floor: floor, Heading: CurrentHeading,
             Velocity: onIsland ? islandTracker.Velocity : minimap.Velocity, Stamp: when, Camera: CurrentCamera));
     }
 
@@ -654,10 +663,10 @@ public sealed class Engine : IDisposable
         bool fresh = player != null && (DateTime.UtcNow - playerTime).TotalSeconds < 60;
         if (layout == null || !fresh)
         {
-            Frame?.Invoke(new OverlayFrame(game.Client, false, null, null, null, false, EffectiveDifficulty, ""));
+            Emit(new OverlayFrame(game.Client, false, null, null, null, false, EffectiveDifficulty, ""));
             return;
         }
-        Frame?.Invoke(new OverlayFrame(game.Client, true, layout, null, player, true, EffectiveDifficulty, "", Mini: true, Floor: minimap.Floor,
+        Emit(new OverlayFrame(game.Client, true, layout, null, player, true, EffectiveDifficulty, "", Mini: true, Floor: minimap.Floor,
             Heading: CurrentHeading, Big: true, Velocity: minimap.Velocity, Stamp: playerTime, Camera: CurrentCamera));
     }
 
@@ -665,7 +674,7 @@ public sealed class Engine : IDisposable
     {
         if (!miniShowing) return;
         miniShowing = false;
-        Frame?.Invoke(new OverlayFrame(game.Client, false, null, null, null, false, null, ""));
+        Emit(new OverlayFrame(game.Client, false, null, null, null, false, null, ""));
     }
 
     bool printWindowFailed;
@@ -1144,7 +1153,7 @@ public sealed class Engine : IDisposable
     DateTime lastRunSeen, lastNoRunCheck = DateTime.UtcNow;
     // Held for 15 s: over bright grass or flowers the timer match dips for seconds at a time on
     // the island, and every dip used to pause tracking (and the island hit's confirmation).
-    public bool InRun => (DateTime.UtcNow - lastRunSeen).TotalSeconds < 15;
+    public bool InRun => InEggHeist && (DateTime.UtcNow - lastRunSeen).TotalSeconds < 15;
     double lastTimerScore;
     bool lastTimerSeen;
 
@@ -1435,14 +1444,14 @@ public sealed class Engine : IDisposable
         // island map has door icons too (Sanctum entrances), so the door method must not run.
         if (settings.IslandMap && db.Island is Layout isl && onIsland)
         {
-            if (!ShowIslandMap(frame, isl)) Frame?.Invoke(new OverlayFrame(c, false, null, null, null, false, EffectiveDifficulty, ""));
+            if (!ShowIslandMap(frame, isl)) Emit(new OverlayFrame(c, false, null, null, null, false, EffectiveDifficulty, ""));
             return;
         }
         if (!settings.IslandMap && outsideStreak >= 3)
         {
             // On the island the map shows Sanctum entrances with the same icons as the doors:
             // don't try to line a Sanctum layout up with it.
-            Frame?.Invoke(new OverlayFrame(c, false, null, null, null, false, EffectiveDifficulty, ""));
+            Emit(new OverlayFrame(c, false, null, null, null, false, EffectiveDifficulty, ""));
             return;
         }
         var cands = Candidates();
@@ -1588,7 +1597,7 @@ public sealed class Engine : IDisposable
         // normal play. Only a longer hold shows the hint / unaligned layout panel.
         // Outside a run (open world, hub) holding the key shows nothing unless a map really fits.
         bool visible = pose != null || (InRun && clock.ElapsedMilliseconds - heldSince > 700);
-        Frame?.Invoke(new OverlayFrame(c, visible, layout, pose, player, fresh, EffectiveDifficulty, status, Floor: refiner.Floor, Heading: CurrentHeading));
+        Emit(new OverlayFrame(c, visible, layout, pose, player, fresh, EffectiveDifficulty, status, Floor: refiner.Floor, Heading: CurrentHeading));
     }
 
     /// <summary>Full map on the island: feature matching against the island art. Returns false
@@ -1596,9 +1605,10 @@ public sealed class Engine : IDisposable
     bool ShowIslandMap(Mat? frame, Layout isl)
     {
         var c = game.Client;
+        if (!InEggHeist) { onIsland = false; Emit(new OverlayFrame(c, false, isl, null, null, false, EffectiveDifficulty, "")); return true; }
         Point2d? arrow = null;
         if (frame != null) doors.Match(frame, [], out arrow); // map-open check + the player's arrow
-        if (!doors.LastMapOpen) { Frame?.Invoke(new OverlayFrame(c, false, isl, null, null, false, EffectiveDifficulty, "")); return true; }
+        if (!doors.LastMapOpen) { Emit(new OverlayFrame(c, false, isl, null, null, false, EffectiveDifficulty, "")); return true; }
         var pose = matcher.Match(frame!, [isl], islandPose);
         LastMatchInfo = "island " + matcher.LastInfo;
         if (clock.ElapsedMilliseconds - lastMatchLog > 1000)
@@ -1615,7 +1625,7 @@ public sealed class Engine : IDisposable
             islandTracker.Seed(islandPlayer.Value);
         }
         onIsland = true;
-        Frame?.Invoke(new OverlayFrame(c, true, isl, pose, islandPlayer, true, EffectiveDifficulty, "Egg Heist island · aligned"));
+        Emit(new OverlayFrame(c, true, isl, pose, islandPlayer, true, EffectiveDifficulty, "Egg Heist island · aligned"));
         return true;
     }
 
