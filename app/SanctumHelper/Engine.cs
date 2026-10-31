@@ -445,7 +445,9 @@ public sealed class Engine : IDisposable
                 // The party screen only exists outside a run: read it often there (a difficulty
                 // changed just before starting is still caught) and never during one.
                 bool inRunNow = InRun || GameLogPlace is GameLog.Place.Island or GameLog.Place.Sanctum;
-                if (now >= nextOcr && settings.Difficulty == "Auto" && ocr.Available && !inRunNow)
+                // (not in a homeland: nothing is read there for now - it is heavy on the game already, and a player's
+                // whole PC lagged there with aLogs running, B4)
+                if (now >= nextOcr && settings.Difficulty == "Auto" && ocr.Available && !inRunNow && GameLogPlace != GameLog.Place.Homeland)
                 {
                     // Each read copies the game window (PrintWindow draws all of it): with the game behind another
                     // window, every 1.5 s is enough to catch the party screen (was every 0.5 s whatever was in front).

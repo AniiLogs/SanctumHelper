@@ -17,7 +17,7 @@ namespace SanctumHelper;
 /// each switch the moment loading starts, 3-11 s before the minimap does.</summary>
 public sealed class GameLog
 {
-    public enum Place { Unknown, Elsewhere, Island, Sanctum }
+    public enum Place { Unknown, Elsewhere, Island, Sanctum, Homeland }
 
     public Place Where { get; private set; } = Place.Unknown;
     /// <summary>The island id of the current run (changes with every run).</summary>
@@ -31,6 +31,8 @@ public sealed class GameLog
     static readonly Regex Connect = new(@"connect to worldx-[a-z]+-[a-z]+-([a-z]+)-", RegexOptions.Compiled);
     bool interlink;               // in Interlink's dungeon rooms (see Line)
     static readonly Regex Scene = new(@"createVoxelScene new>>>id:(\S+)", RegexOptions.Compiled);
+    // A homeland is "100-<player id>-550" (anyone's): nothing is read there for now (it is heavy on the game already)
+    static readonly Regex HomelandId = new(@"^\d+-\d+-550$", RegexOptions.Compiled);
 
     readonly string path;
     long pos;
@@ -131,7 +133,7 @@ public sealed class GameLog
         if (server != "dungeon" || interlink)
         {
             islandId = sanctumId = null;
-            Set(Place.Elsewhere, false);
+            Set(HomelandId.IsMatch(id) ? Place.Homeland : Place.Elsewhere, false);
             return;
         }
         if (islandId == null || (id != islandId && id != sanctumId && sanctumId != null))
