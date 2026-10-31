@@ -109,8 +109,8 @@ public static class SharedCapture
         }
     }
 
-    /// <summary>Every aLogs overlay's spot now (screen px), ours included: covered in a picture of the screen.</summary>
-    public static System.Collections.Generic.List<Rect> Overlays()
+    /// <summary>Every aLogs overlay's spot now (screen px), ours included unless skipped: covered in a picture of the screen.</summary>
+    public static System.Collections.Generic.List<Rect> Overlays(int skipOwner = -1)
     {
         var all = new System.Collections.Generic.List<Rect>();
         lock (gate)
@@ -119,6 +119,7 @@ public static class SharedCapture
             long now = NowMs;
             for (int owner = 0; owner < 3; owner++)
             {
+                if (owner == skipOwner) continue;
                 int at = OverlayBase + owner * OverlayBlock;
                 if (now - I64(at) > OverlayStaleMs) continue;
                 int n = (int)Math.Min(OverlayMax, U32(at + 12));

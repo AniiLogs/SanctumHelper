@@ -47,19 +47,22 @@ public sealed class OverlayWindow : Window
     }
 
     bool? excluded;
-    bool overGame;     // the window spans the game and draws over what's read (big map, Overlay style, over the minimap)
+    bool overGame;     // the window spans the game and draws over what's read (the labels on the in-game map)
+    bool shown;
 
-    /// <summary>In screenshots and recordings unless the player hid overlays from them (Recordable overlay off). A map
-    /// panel is covered by every reader of a picture of the screen (OwnOverlays). A map drawn over the game itself
-    /// (the big map, the Overlay style, over the game's minimap) covers what is read, so where the picture is a copy of
-    /// the screen it stays out of it; and every overlay steps out for the moment the meter takes a proof.</summary>
+    /// <summary>In screenshots and recordings unless the player hid overlays from them (Recordable overlay off), on any
+    /// Windows. Its spot is shared (OwnOverlays): the meter and the app cover it in their pictures of the screen, and
+    /// where it is over what we read (the in-game map, over the game's minimap) we read that part without it
+    /// (Magnifier). Only where the magnifier gives nothing does a map over what's read stay out of screen captures.
+    /// Every overlay steps out for the moment the meter takes a proof.</summary>
     public void ApplyCaptureMode(bool screenFallback = false)
     {
         forceExclude |= screenFallback;
         if (hwnd == IntPtr.Zero) return;
         bool screenCopy = forceExclude || (SharedCapture.InUse && SharedCapture.ScreenCopy);
-        bool exclude = !settings.RecordableOverlay || settings.MiniMapCorner == "OverGame"
-            || (overGame && screenCopy) || SharedCapture.CleanNow;
+        bool exclude = !settings.RecordableOverlay || SharedCapture.CleanNow
+            || (Magnifier.Failed && (forceExclude || settings.MiniMapCorner == "OverGame" || (overGame && screenCopy)));
+        OwnOverlays.InCapture("map", hwnd, shown && !exclude);
         if (excluded == exclude) return;
         excluded = exclude;
         Native.SetWindowDisplayAffinity(hwnd, exclude ? Native.WDA_EXCLUDEFROMCAPTURE : Native.WDA_NONE);
@@ -83,11 +86,14 @@ public sealed class OverlayWindow : Window
         // while the map glides: that stuttered and flickered on 4K screens.
         var want = f.Client;
         var offset = new Point();
-        if (f.Visible && f.Mini && !f.Big && f.Layout != null && f.Client.Width > 0
-            && view.MiniStyle(f, f.Layout) is string st && st is "Corner" or "Disc" or "Radar" or "Compass")
+        if (f.Visible && f.Mini && f.Layout != null && f.Client.Width > 0
+            && view.MiniStyle(f, f.Layout) is string st && st is "Corner" or "Disc" or "Radar" or "Compass" or "Big" or "Overlay")
         {
             double ui = Regions.Ui(f.Client.Width, f.Client.Height), m = 70 * ui; // room for labels, rim arrows, the legend
-            var r = view.MiniPanel(st, f.Client.Width, f.Client.Height, ui);
+            Rect r;
+            if (st == "Big") { r = OverlayView.BigPanel(settings, f.Client.Width, f.Client.Height, ui); m = 24 * ui; }  // its caption
+            else if (st == "Overlay") { r = OverlayView.SeeThroughArea(f.Client.Width, f.Client.Height); m = 0; }
+            else r = view.MiniPanel(st, f.Client.Width, f.Client.Height, ui);
             r = new Rect(r.X - m, r.Y - m, r.Width + 2 * m, r.Height + 2 * m);
             r.Intersect(new Rect(0, 0, f.Client.Width, f.Client.Height));
             if (!r.IsEmpty)
@@ -97,9 +103,10 @@ public sealed class OverlayWindow : Window
             }
         }
         view.Offset = offset;
-        // a panel (want smaller than the game) is a spot others cover; a whole-game window draws over what's read
+        // the window's spot, for the other programs to cover (and for us to read under it where it's over what's read)
         overGame = f.Visible && want == f.Client;
-        OwnOverlays.Set("map", f.Visible && want.Width > 0 && !overGame ? want : null);
+        shown = f.Visible && want.Width > 0;
+        OwnOverlays.Set("map", shown ? want : null);
         ApplyCaptureMode();
         if (f.Visible && want.Width > 0 && want != placed)
         {
@@ -645,6 +652,30 @@ public sealed class OverlayView : FrameworkElement
             new OpenCvSharp.Point2d(at[0] + 40, at[1] + 30), true, null, "", Mini: true, Heading: 35);
     }
 
+    /// <summary>The top of the game the meter reads (the boss bar, its break gauge and counter, the timer): the big map
+    /// and the see-through outlines stay below it, as the meter covers our maps in its picture of the screen.</summary>
+    public const double MeterBand = 0.13;
+
+    /// <summary>Big map: a large panel in the middle, clear of the HUD corner on the left, (with its caption) below the
+    /// meter's band at the top, and above the game's own bar at the bottom (where the default size always ended).</summary>
+    public static Rect BigPanel(Settings settings, double w, double h, double ui)
+    {
+        double top = MeterBand * h + 24 * ui, bottom = 0.9 * h;
+        double size = Math.Max(1, Math.Min(Math.Min(settings.BigMapSize * h, w - 2 * 340 * ui), bottom - top));
+        double y = Math.Clamp((h - size) / 2, top, Math.Max(top, bottom - size));
+        return new Rect((w - size) / 2, y, size, size);
+    }
+
+    /// <summary>Where the see-through outlines can show: the circle they fade out in (around the character, a little
+    /// below the screen center), from the meter's band down.</summary>
+    public static Rect SeeThroughArea(double w, double h)
+    {
+        double r = h * 0.55, cx = w / 2, cy = h * 0.56, top = MeterBand * h;
+        var a = new Rect(cx - r, top, 2 * r, cy + r - top);
+        a.Intersect(new Rect(0, 0, w, h));
+        return a.IsEmpty ? new Rect(0, top, w, h - top) : a;
+    }
+
     /// <summary>On-screen map while the full map is closed, centered on the player: one of
     /// MiniMapStyles, or the big zoom map while the key is held.</summary>
     void RenderMini(DrawingContext dc, OverlayFrame f, Layout L, OpenCvSharp.Point2d me, double ui)
@@ -657,12 +688,7 @@ public sealed class OverlayView : FrameworkElement
         double ms = settings.MarkerScale * ui * (f.Big ? 0.85 : center ? 0.75 : 0.6);
         Rect panel;
         if (center) panel = new Rect(0, 0, f.Client.Width, f.Client.Height);
-        else if (f.Big)
-        {
-            // Big map: a large panel in the middle, clear of the HUD corner on the left.
-            double size = Math.Min(settings.BigMapSize * f.Client.Height, f.Client.Width - 2 * 340 * ui);
-            panel = new Rect((f.Client.Width - size) / 2, (f.Client.Height - size) / 2, size, size);
-        }
+        else if (f.Big) panel = BigPanel(settings, f.Client.Width, f.Client.Height, ui);
         else panel = MiniPanel(style, f.Client.Width, f.Client.Height, ui);
         PanelRect = panel;
 
@@ -720,10 +746,20 @@ public sealed class OverlayView : FrameworkElement
         fade.GradientStops.Add(new GradientStop(Color.FromArgb(255, 0, 0, 0), 0.0));
         fade.GradientStops.Add(new GradientStop(Color.FromArgb(255, 0, 0, 0), 0.45));
         fade.GradientStops.Add(new GradientStop(Color.FromArgb(0, 0, 0, 0), 1.0));
+        // and out towards the top, gone by the meter's band (the boss bar), where the window ends
+        var area = SeeThroughArea(f.Client.Width, f.Client.Height);
+        var top = new LinearGradientBrush
+        {
+            MappingMode = BrushMappingMode.Absolute, StartPoint = new Point(0, area.Top), EndPoint = new Point(0, area.Top + 0.08 * f.Client.Height),
+        };
+        top.GradientStops.Add(new GradientStop(Color.FromArgb(0, 0, 0, 0), 0.0));
+        top.GradientStops.Add(new GradientStop(Color.FromArgb(255, 0, 0, 0), 1.0));
+        dc.PushOpacityMask(top);
         dc.PushOpacityMask(fade);
         dc.PushOpacity(settings.OverlayOpacity);
         dc.DrawImage(outline, new Rect(tx, ty, outline.PixelWidth * scale, outline.PixelHeight * scale));
         DrawMarkers(dc, L, P, ms, labels: false);
+        dc.Pop();
         dc.Pop();
         dc.Pop();
         ViewCone(dc, c, f.Camera, 150 * ui);

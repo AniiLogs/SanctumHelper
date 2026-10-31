@@ -65,6 +65,44 @@ public partial class App : Application
             Dispatcher.BeginInvoke(pov.BeginPlacement, System.Windows.Threading.DispatcherPriority.ApplicationIdle);
             return;
         }
+        if (e.Args.Length >= 2 && e.Args[0] == "--magnifier-test")
+        {
+            // Developer check: a picture of the screen without our overlay (Magnifier), read off a background thread
+            // like the engine's. A see-through red overlay over a green window: without it, green; a plain copy, red.
+            static Window Box(System.Windows.Media.Color c, bool overlay) => new()
+            {
+                Left = 300, Top = 300, Width = 400, Height = 300, WindowStyle = WindowStyle.None, ResizeMode = ResizeMode.NoResize,
+                Topmost = overlay, ShowInTaskbar = false, AllowsTransparency = overlay,
+                Background = new System.Windows.Media.SolidColorBrush(overlay ? System.Windows.Media.Color.FromArgb(160, c.R, c.G, c.B) : c),
+            };
+            var under = Box(System.Windows.Media.Colors.Lime, false); under.Show();
+            var over = Box(System.Windows.Media.Colors.Red, true); over.Show();
+            var h = new System.Windows.Interop.WindowInteropHelper(over).Handle;
+            Native.SetWindowLongPtr(h, Native.GWL_EXSTYLE, new IntPtr((long)Native.GetWindowLongPtr(h, Native.GWL_EXSTYLE) | Native.WS_EX_TRANSPARENT | Native.WS_EX_LAYERED));
+            var dir = e.Args[1];
+            new System.Threading.Thread(() =>
+            {
+                System.Threading.Thread.Sleep(800);
+                var lines = new System.Collections.Generic.List<string>();
+                var r = new OpenCvSharp.Rect(0, 0, 100, 100);
+                var pos = Dispatcher.Invoke(() => { var dpi = System.Windows.Media.VisualTreeHelper.GetDpi(over); return ((int)(400 * dpi.DpiScaleX), (int)(400 * dpi.DpiScaleY)); });
+                r.X = pos.Item1; r.Y = pos.Item2;
+                for (int i = 0; i < 3; i++)
+                {
+                    var sw = System.Diagnostics.Stopwatch.StartNew();
+                    using var m = Magnifier.Grab(r, new[] { h });
+                    double ms = sw.Elapsed.TotalMilliseconds;
+                    using var plain = ScreenGrabber.Grab(r);
+                    string Px(OpenCvSharp.Mat? x) => x == null ? "none" : x.At<OpenCvSharp.Vec3b>(50, 50).ToString();
+                    lines.Add($"without overlay {Px(m)} ({ms:F1} ms, {m?.Width}x{m?.Height}) | plain screen copy {Px(plain)}");
+                }
+                lines.Add("magnifier failed: " + Magnifier.Failed);
+                Directory.CreateDirectory(dir);
+                File.WriteAllLines(Path.Combine(dir, "magnifier.txt"), lines);
+                Dispatcher.Invoke(Shutdown);
+            }) { IsBackground = true }.Start();
+            return;
+        }
         if (e.Args.Length >= 6 && e.Args[0] == "--styles")
         {
             try { Analyzer.Styles(e.Args, LayoutDb.Load(Path.Combine(AppContext.BaseDirectory, "Assets"))); }

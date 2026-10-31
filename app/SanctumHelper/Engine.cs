@@ -518,9 +518,9 @@ public sealed class Engine : IDisposable
                 // copy here ~60 times a second made the desktop finish composing each time and the game stutter.
                 var corner = CornerRect(rc, c);
                 long grabbed = Environment.TickCount64;
-                var top = SharedCapture.AppPresent ? SharedCapture.TryGrab(game.Handle, c.Width, c.Height, corner)
-                    : ScreenGrabber.Grab(new Rect(c.X + corner.X, c.Y + corner.Y, corner.Width, corner.Height));
+                var top = SharedCapture.AppPresent ? SharedCapture.TryGrab(game.Handle, c.Width, c.Height, corner) : ScreenPart(corner);
                 if (top == null) { Thread.Sleep(4); continue; }   // no fresh shared frame yet
+                if (SharedCapture.AppPresent && SharedCapture.ScreenCopy) top = Clean(top, corner);
                 lock (cornerGate) { sharedCorner?.Dispose(); sharedCorner = top; sharedCornerAt = grabbed; sharedCornerSeq++; }
                 cornerReady.Set();   // the tracking loop picks it up right away instead of on its next tick
                 using (var mm = new Mat(top, InCorner(rc, corner)))
@@ -531,7 +531,8 @@ public sealed class Engine : IDisposable
                 }
             }
             catch (Exception e) { Log.Write("heading: " + e.Message); Thread.Sleep(500); }
-            int left = HeadingPeriodMs - (int)(sw.ElapsedMilliseconds - t0);
+            // a corner read without our map over it (Magnifier) costs about a screen copy: at most 25 a second
+            int left = (magnified ? 40 : HeadingPeriodMs) - (int)(sw.ElapsedMilliseconds - t0);
             if (left > 0) Thread.Sleep(left);
         }
     }
@@ -691,15 +692,60 @@ public sealed class Engine : IDisposable
     long firstCaptureMiss;
 
     /// <summary>A picture of the screen has every aLogs overlay window in it (they stay in screenshots and recordings):
-    /// covered in black where each one is (SharedCapture.Overlays: ours, the meter's, the app's button), so nothing
-    /// reads them. A map drawn over the game itself isn't listed: that one stays out of screen pictures instead.</summary>
-    static void CoverOverlays(Mat m, Rect client, Rect sub)
+    /// covered in black where each one is (SharedCapture.Overlays: the meter's, the app's button; and ours in captures
+    /// unless the picture was taken without them), so nothing reads them.</summary>
+    static void CoverOverlays(Mat m, Rect client, Rect sub, bool oursToo = true)
     {
-        foreach (var o in SharedCapture.Overlays())
+        var spots = SharedCapture.Overlays(SharedCapture.OwnerSanctum);
+        if (oursToo) spots.AddRange(OwnOverlays.Shown());
+        foreach (var o in spots)
         {
             var r = new Rect(o.X - client.X - sub.X, o.Y - client.Y - sub.Y, o.Width, o.Height) & new Rect(0, 0, m.Width, m.Height);
             if (r.Width > 0 && r.Height > 0) using (var part = new Mat(m, r)) part.SetTo(Scalar.Black);
         }
+    }
+
+    [ThreadStatic] static bool magnified;   // this thread's last picture was taken without our windows
+    bool magnifierSaid;
+
+    static Rect OnScreen(Rect client, Rect sub) => new(client.X + sub.X, client.Y + sub.Y, sub.Width, sub.Height);
+
+    /// <summary>That part of the screen without our windows, where one in screen captures is over it (a map drawn over
+    /// the game: covering it would leave nothing to read); null where none is, or the magnifier gives nothing.</summary>
+    Mat? WithoutOurs(Rect screen)
+    {
+        magnified = false;
+        var ours = OwnOverlays.Over(screen);
+        if (ours.Count == 0) return null;
+        var m = Magnifier.Grab(screen, ours);
+        if (m == null) return null;
+        magnified = true;
+        if (!magnifierSaid) { magnifierSaid = true; Log.Write("a map over the game is in screen captures: the part under it is read without it (magnifier)"); }
+        return m;
+    }
+
+    /// <summary>A shared picture that is a copy of the screen, made safe to read: taken again without our windows where
+    /// one is over it, and the other programs' overlays covered.</summary>
+    Mat Clean(Mat shared, Rect sub)
+    {
+        var c = game.Client;
+        var clean = WithoutOurs(OnScreen(c, sub));
+        if (clean != null && clean.Width == shared.Width && clean.Height == shared.Height)
+        {
+            shared.Dispose();
+            CoverOverlays(clean, c, sub, oursToo: false);
+            return clean;
+        }
+        clean?.Dispose();
+        CoverOverlays(shared, c, sub);
+        return shared;
+    }
+
+    /// <summary>Our own copy of part of the screen (no aLogs app): without our windows where one is over it.</summary>
+    Mat ScreenPart(Rect sub)
+    {
+        var r = OnScreen(game.Client, sub);
+        return WithoutOurs(r) ?? ScreenGrabber.Grab(r);
     }
 
     /// <summary>A part of the game's client area (client coordinates).</summary>
@@ -720,7 +766,7 @@ public sealed class Engine : IDisposable
                     sharedScreenCopy = true;
                     Log.Write("the aLogs app shares its Desktop Duplication picture: every aLogs overlay in it is covered before reading");
                 }
-                CoverOverlays(shared, c, sub);
+                shared = Clean(shared, sub);
             }
             perfSource = SharedCapture.ScreenCopy ? "shared desktop duplication" : "shared window capture";
             return shared ?? new Mat(Math.Max(1, sub.Height), Math.Max(1, sub.Width), MatType.CV_8UC3, Scalar.Black);
@@ -738,11 +784,11 @@ public sealed class Engine : IDisposable
             if (windowCaptureMisses >= 40 && clock.ElapsedMilliseconds - firstCaptureMiss > 3000)
             {
                 printWindowFailed = true;
-                Log.Write("window capture keeps giving no image; using screen capture (overlay hidden from recordings)");
+                Log.Write("window capture keeps giving no image; using screen capture (the parts under our overlays read without them)");
                 CaptureFallback?.Invoke();
             }
         }
-        return ScreenGrabber.Grab(new Rect(c.X + sub.X, c.Y + sub.Y, sub.Width, sub.Height));
+        return ScreenPart(sub);
     }
 
     /// <summary>Raised when window capture fails, so the overlay can hide itself from captures again.</summary>
@@ -803,8 +849,7 @@ public sealed class Engine : IDisposable
         // 27 ms for a whole-window capture; no overlay ever draws over the HUD corner).
         var grabbedAt = DateTime.UtcNow;     // when the picture was taken (the heading loop's copy: a few ms ago)
         using var top = fullFrame != null ? new Mat(fullFrame, corner).Clone()
-            : TakeSharedCorner(corner, ref grabbedAt) ?? (SharedCapture.AppPresent ? Grab(corner)
-                : ScreenGrabber.Grab(new Rect(c.X + corner.X, c.Y + corner.Y, corner.Width, corner.Height)));
+            : TakeSharedCorner(corner, ref grabbedAt) ?? (SharedCapture.AppPresent ? Grab(corner) : ScreenPart(corner));
         // Counts of "N readings in a row" below were tuned at ~20 ticks a second: they only advance
         // on ticks at least 45 ms apart, so they still span the same time at today's faster ticks.
         bool slowTick = clock.ElapsedMilliseconds - lastSlowTick >= 45;

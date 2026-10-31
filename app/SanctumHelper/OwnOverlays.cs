@@ -15,6 +15,28 @@ public static class OwnOverlays
     static readonly Dictionary<string, Rect> current = new();
     static readonly List<(Rect Spot, long Until)> left = new();
     static long published;
+    // each window's handle while it is in screen captures: a picture of the part of the screen under one is taken
+    // without it (Magnifier), as covering it would leave nothing to read where a map is drawn over the game
+    static readonly Dictionary<string, IntPtr> inCapture = new();
+
+    /// <summary>Whether a window (by the same name as its spot) is in screen captures now.</summary>
+    public static void InCapture(string who, IntPtr hwnd, bool shown)
+    {
+        lock (gate) { if (shown) inCapture[who] = hwnd; else inCapture.Remove(who); }
+    }
+
+    /// <summary>Our spots in screen captures now.</summary>
+    public static List<Rect> Shown()
+    {
+        lock (gate) return current.Where(c => inCapture.ContainsKey(c.Key)).Select(c => c.Value).ToList();
+    }
+
+    /// <summary>Our windows over that part of the screen and in screen captures (so in a copy of the screen).</summary>
+    public static List<IntPtr> Over(Rect screen)
+    {
+        lock (gate)
+            return current.Where(c => inCapture.ContainsKey(c.Key) && c.Value.IntersectsWith(screen)).Select(c => inCapture[c.Key]).ToList();
+    }
 
     public static void Set(string who, Rect? spot)
     {

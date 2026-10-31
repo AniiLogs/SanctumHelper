@@ -1,4 +1,6 @@
 using System;
+using System.Collections.Generic;
+using System.Linq;
 using System.Runtime.InteropServices;
 using OpenCvSharp;
 
@@ -116,4 +118,114 @@ public static class ScreenGrabber
             Native.DeleteDC(Dc);
         }
     }
+}
+
+/// <summary>A picture of part of the screen without some of our own windows in it (the Magnification API's filter
+/// list, as screen sharing in browsers does it): for a map drawn over what is read while it stays in screenshots and
+/// recordings (a copy of the screen, Desktop Duplication, has it in). Each thread gets its own hidden magnifier.
+/// About as costly as a plain screen copy of the same area.</summary>
+public static class Magnifier
+{
+    /// <summary>True once the magnifier gave no picture here: the map then stays out of captures instead.</summary>
+    public static bool Failed { get; private set; }
+
+    [ThreadStatic] static Instance? mine;
+    static readonly object gate = new();
+    static bool initialized;
+
+    public static Mat? Grab(Rect screen, IReadOnlyList<IntPtr> without)
+    {
+        if (Failed || screen.Width <= 0 || screen.Height <= 0) return null;
+        try
+        {
+            lock (gate) if (!initialized) { if (!MagInitialize()) { Fail("not available"); return null; } initialized = true; }
+            mine ??= new Instance();
+            var m = mine.Grab(screen, without);
+            if (m == null) Fail("gave no picture");
+            return m;
+        }
+        catch (Exception e) { Fail(e.Message); return null; }
+    }
+
+    static void Fail(string why)
+    {
+        if (Failed) return;
+        Failed = true;
+        Log.Write($"magnifier {why}: maps over the game stay out of screen captures where the picture is a copy of the screen");
+    }
+
+    sealed class Instance
+    {
+        readonly IntPtr host, mag;
+        readonly ImageScalingCallback callback;   // kept alive while the magnifier may call it
+        Mat? got;
+        Size size;
+
+        public Instance()
+        {
+            host = CreateWindowEx(WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, "Static", "SanctumHelper magnifier", WS_POPUP,
+                0, 0, 1, 1, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
+            SetLayeredWindowAttributes(host, 0, 255, LWA_ALPHA);
+            mag = CreateWindowEx(0, "Magnifier", "", WS_CHILD | WS_VISIBLE, 0, 0, 1, 1, host, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
+            if (host == IntPtr.Zero || mag == IntPtr.Zero) throw new InvalidOperationException("no magnifier window");
+            callback = OnImage;
+            if (!MagSetImageScalingCallback(mag, callback)) throw new InvalidOperationException("no image callback");
+        }
+
+        bool OnImage(IntPtr hwnd, IntPtr src, MAGIMAGEHEADER sh, IntPtr dst, MAGIMAGEHEADER dh, RECT unclipped, RECT clipped, IntPtr dirty)
+        {
+            if (sh.width != size.Width || sh.height != size.Height) return true;
+            using var bgra = Mat.FromPixelData((int)sh.height, (int)sh.width, MatType.CV_8UC4, src + (int)sh.offset, sh.stride);
+            got?.Dispose();
+            got = new Mat();
+            Cv2.CvtColor(bgra, got, ColorConversionCodes.BGRA2BGR);
+            return true;
+        }
+
+        public Mat? Grab(Rect r, IReadOnlyList<IntPtr> without)
+        {
+            got?.Dispose(); got = null;
+            if (r.Width != size.Width || r.Height != size.Height)
+            {
+                size = new Size(r.Width, r.Height);
+                SetWindowPos(host, IntPtr.Zero, 0, 0, r.Width, r.Height, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+                SetWindowPos(mag, IntPtr.Zero, 0, 0, r.Width, r.Height, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+            }
+            var list = without.Where(h => h != IntPtr.Zero).ToArray();
+            MagSetWindowFilterList(mag, MW_FILTERMODE_EXCLUDE, list.Length, list);
+            if (!MagSetWindowSource(mag, new RECT { Left = r.X, Top = r.Y, Right = r.Right, Bottom = r.Bottom })) return null;
+            InvalidateRect(mag, IntPtr.Zero, true);
+            UpdateWindow(mag);
+            // this thread has no message loop: drop what the hidden windows were sent meanwhile
+            while (PeekMessage(out var msg, IntPtr.Zero, 0, 0, PM_REMOVE)) { TranslateMessage(ref msg); DispatchMessage(ref msg); }
+            var m = got; got = null;
+            return m;
+        }
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct MAGIMAGEHEADER { public uint width, height; public Guid format; public uint stride, offset; public UIntPtr cbSize; }
+    [StructLayout(LayoutKind.Sequential)] struct RECT { public int Left, Top, Right, Bottom; }
+    [StructLayout(LayoutKind.Sequential)]
+    struct MSG { public IntPtr hwnd; public uint message; public UIntPtr wParam; public IntPtr lParam; public uint time; public int x, y; }
+    [UnmanagedFunctionPointer(CallingConvention.Winapi)]
+    delegate bool ImageScalingCallback(IntPtr hwnd, IntPtr src, MAGIMAGEHEADER sh, IntPtr dst, MAGIMAGEHEADER dh, RECT unclipped, RECT clipped, IntPtr dirty);
+
+    const int MW_FILTERMODE_EXCLUDE = 0, LWA_ALPHA = 2, PM_REMOVE = 1;
+    const uint WS_POPUP = 0x80000000, WS_CHILD = 0x40000000, WS_VISIBLE = 0x10000000;
+    const uint WS_EX_LAYERED = 0x80000, WS_EX_TOOLWINDOW = 0x80, WS_EX_NOACTIVATE = 0x08000000;
+    const uint SWP_NOMOVE = 0x2, SWP_NOZORDER = 0x4, SWP_NOACTIVATE = 0x10;
+    [DllImport("Magnification.dll")] static extern bool MagInitialize();
+    [DllImport("Magnification.dll")] static extern bool MagSetImageScalingCallback(IntPtr hwnd, ImageScalingCallback cb);
+    [DllImport("Magnification.dll")] static extern bool MagSetWindowFilterList(IntPtr hwnd, int mode, int count, IntPtr[] list);
+    [DllImport("Magnification.dll")] static extern bool MagSetWindowSource(IntPtr hwnd, RECT rect);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    static extern IntPtr CreateWindowEx(uint ex, string cls, string name, uint style, int x, int y, int w, int h, IntPtr parent, IntPtr menu, IntPtr inst, IntPtr param);
+    [DllImport("user32.dll")] static extern bool SetLayeredWindowAttributes(IntPtr hwnd, uint key, byte alpha, uint flags);
+    [DllImport("user32.dll")] static extern bool SetWindowPos(IntPtr hwnd, IntPtr after, int x, int y, int w, int h, uint flags);
+    [DllImport("user32.dll")] static extern bool InvalidateRect(IntPtr hwnd, IntPtr rect, bool erase);
+    [DllImport("user32.dll")] static extern bool UpdateWindow(IntPtr hwnd);
+    [DllImport("user32.dll")] static extern bool PeekMessage(out MSG msg, IntPtr hwnd, uint min, uint max, uint remove);
+    [DllImport("user32.dll")] static extern bool TranslateMessage(ref MSG msg);
+    [DllImport("user32.dll")] static extern IntPtr DispatchMessage(ref MSG msg);
 }

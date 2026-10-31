@@ -93,6 +93,7 @@ public sealed class ToastWindow : Window
     {
         if (hwnd == IntPtr.Zero) return;
         bool exclude = !settings.RecordableOverlay || SharedCapture.CleanNow;
+        OwnOverlays.InCapture("toast", hwnd, showing && !exclude);
         if (excluded == exclude) return;
         excluded = exclude;
         Native.SetWindowDisplayAffinity(hwnd, exclude ? Native.WDA_EXCLUDEFROMCAPTURE : Native.WDA_NONE);
@@ -100,7 +101,7 @@ public sealed class ToastWindow : Window
 
     void Next()
     {
-        if (queue.Count == 0) { showing = false; gateTimer?.Stop(); OwnOverlays.Set("toast", null); Hide(); return; }
+        if (queue.Count == 0) { showing = false; gateTimer?.Stop(); OwnOverlays.Set("toast", null); OwnOverlays.InCapture("toast", hwnd, false); Hide(); return; }
         showing = true;
         var (text, accent) = queue.Dequeue();
         label.Text = text;
