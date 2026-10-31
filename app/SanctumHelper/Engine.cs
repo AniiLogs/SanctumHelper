@@ -451,7 +451,9 @@ public sealed class Engine : IDisposable
                 {
                     // Each read copies the game window (PrintWindow draws all of it): with the game behind another
                     // window, every 1.5 s is enough to catch the party screen (was every 0.5 s whatever was in front).
-                    nextOcr = now + (game.IsForeground ? 500 : 1500);
+                    // (once a second in front: the party screen stays up while you pick, and twice a second added to a
+                    // player's camera stutter out in the world, B4)
+                    nextOcr = now + (game.IsForeground ? 1000 : 1500);
                     var t0 = perfClock.ElapsedTicks;
                     ReadPartyScreen();
                     perfOcr.Add(perfClock.ElapsedTicks - t0);
