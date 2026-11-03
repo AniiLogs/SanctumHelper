@@ -445,19 +445,21 @@ public sealed class Engine : IDisposable
                 // The party screen only exists outside a run: read it often there (a difficulty
                 // changed just before starting is still caught) and never during one.
                 bool inRunNow = InRun || GameLogPlace is GameLog.Place.Island or GameLog.Place.Sanctum;
-                // In a homeland too, where players queue for Egg Heist (skipping it there left Auto with no difficulty,
-                // 0.1.31 report), but only every 2 s: that read, the goal line's band from the app's shared capture,
-                // is all that runs there (a player's whole PC lagged in a homeland with aLogs running, B4).
+                // In a homeland too, where players queue for Egg Heist: skipping it there (B4: a player's whole PC
+                // lagged in a homeland with aLogs running) left Auto with no difficulty (0.1.31 report; a player read
+                // 3 s before leaving home on 28 Oct, then nothing). It's the only read there, at the same pace: the
+                // party screen can be up for a few seconds only, and the goal line's band is all that's copied.
                 if (now >= nextOcr && settings.Difficulty == "Auto" && ocr.Available && !inRunNow)
                 {
                     // Each read copies the game window (PrintWindow draws all of it): with the game behind another
                     // window, every 1.5 s is enough to catch the party screen (was every 0.5 s whatever was in front).
-                    // (once a second in front: the party screen stays up while you pick, and twice a second added to a
-                    // player's camera stutter out in the world, B4)
-                    nextOcr = now + (GameLogPlace == GameLog.Place.Homeland ? 2000 : game.IsForeground ? 1000 : 1500);
+                    // (once a second in front: twice a second added to a player's camera stutter out in the world, B4.
+                    // While the party screen is up, twice a second: a player who picks and starts within a second or
+                    // two still has the last difficulty read; it's a still menu, and an unchanged band isn't read again)
                     var t0 = perfClock.ElapsedTicks;
-                    ReadPartyScreen();
+                    bool onParty = ReadPartyScreen();
                     perfOcr.Add(perfClock.ElapsedTicks - t0);
+                    nextOcr = now + (onParty ? 500 : game.IsForeground ? 1000 : 1500);
                 }
                 if (!game.IsForeground) { HideMini(); Thread.Sleep(250); continue; }
                 // Faster while the on-screen map follows the player; tracking is cheap then.
@@ -796,14 +798,15 @@ public sealed class Engine : IDisposable
     public event Action? CaptureFallback;
     public bool UsingWindowCapture => settings.RecordableOverlay && !printWindowFailed;
 
-    void ReadPartyScreen()
+    /// <summary>Reads the party screen's difficulty; true while the party screen is up.</summary>
+    bool ReadPartyScreen()
     {
         var c = game.Client;
         var rc = Regions.ToClient(settings.PartyGoalRegion, Anchor.TopCenter, c.Width, c.Height);
         // Grab only a band around the goal line; cheap enough to do every 1.5 s.
         using var band = Grab(new Rect(0, 0, c.Width, Math.Min(c.Height, rc.Bottom + 10)));
         var d = difficulty.Detect(band, settings.PartyGoalRegion, c.Width, c.Height);
-        if (d == null) return;
+        if (d == null) return false;
         // Being on the party screen means any previous run is over.
         if (CurrentLayout != null && settings.ForcedLayout == 0) ResetRun();
         difficultyDoubted = false;
@@ -814,6 +817,7 @@ public sealed class Engine : IDisposable
             Notify?.Invoke(Lang.F("{0} Mode found.", Lang.Difficulty(d)), d);
             StatusChanged?.Invoke();
         }
+        return true;
     }
 
     /// <summary>The map screen's title corner (client px): 400x200 at 1080p, scaled with the game's UI and at the
