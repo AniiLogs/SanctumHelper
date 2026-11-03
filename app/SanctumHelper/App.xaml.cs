@@ -152,8 +152,13 @@ public partial class App : Application
         engine.CaptureFallback += () => Dispatcher.BeginInvoke(() => overlay.ApplyCaptureMode(screenFallback: true));
         toast = new ToastWindow(settings);
         engine.LanguageDetected += () => Dispatcher.BeginInvoke(LanguageChanged);
+        // shown by the aLogs DPS meter with every other notice while its overlay runs (SharedNotices), else here
         engine.Notify += (text, diff) => Dispatcher.BeginInvoke(() =>
-            toast.Show(text, diff != null ? OverlayView.DifficultyColor(diff) : System.Windows.Media.Color.FromRgb(0x5C, 0xB8, 0xFF), engine.GameClient));
+        {
+            var accent = diff != null ? OverlayView.DifficultyColor(diff) : System.Windows.Media.Color.FromRgb(0x5C, 0xB8, 0xFF);
+            if (settings.ShowNotifications && SharedNotices.TryHandOff(text, accent, engine.GameClient)) return;
+            toast.Show(text, accent, engine.GameClient);
+        });
         engine.Start();
 
         if (hostedMode)
