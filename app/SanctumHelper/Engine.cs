@@ -445,15 +445,16 @@ public sealed class Engine : IDisposable
                 // The party screen only exists outside a run: read it often there (a difficulty
                 // changed just before starting is still caught) and never during one.
                 bool inRunNow = InRun || GameLogPlace is GameLog.Place.Island or GameLog.Place.Sanctum;
-                // (not in a homeland: nothing is read there for now - it is heavy on the game already, and a player's
-                // whole PC lagged there with aLogs running, B4)
-                if (now >= nextOcr && settings.Difficulty == "Auto" && ocr.Available && !inRunNow && GameLogPlace != GameLog.Place.Homeland)
+                // In a homeland too, where players queue for Egg Heist (skipping it there left Auto with no difficulty,
+                // 0.1.31 report), but only every 2 s: that read, the goal line's band from the app's shared capture,
+                // is all that runs there (a player's whole PC lagged in a homeland with aLogs running, B4).
+                if (now >= nextOcr && settings.Difficulty == "Auto" && ocr.Available && !inRunNow)
                 {
                     // Each read copies the game window (PrintWindow draws all of it): with the game behind another
                     // window, every 1.5 s is enough to catch the party screen (was every 0.5 s whatever was in front).
                     // (once a second in front: the party screen stays up while you pick, and twice a second added to a
                     // player's camera stutter out in the world, B4)
-                    nextOcr = now + (game.IsForeground ? 1000 : 1500);
+                    nextOcr = now + (GameLogPlace == GameLog.Place.Homeland ? 2000 : game.IsForeground ? 1000 : 1500);
                     var t0 = perfClock.ElapsedTicks;
                     ReadPartyScreen();
                     perfOcr.Add(perfClock.ElapsedTicks - t0);
