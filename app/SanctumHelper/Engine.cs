@@ -1251,7 +1251,10 @@ public sealed class Engine : IDisposable
                 using var part = new Mat(small, area);
                 using var v = ValueChannel(part);
                 Cv2.MatchTemplate(v, timerTemplate, res, TemplateMatchModes.CCoeffNormed);
-                Cv2.MinMaxLoc(res, out _, out double max, out _, out _);
+                Cv2.MinMaxLoc(res, out _, out double max, out _, out Point at);
+                // The match ignores brightness: the stopwatch dimmed by a fade to black still matched, so the run
+                // looked on and the on-screen map stayed up over the black. Only a lit stopwatch counts.
+                if (!Lit(v, new Rect(at, timerTemplate.Size()))) max = 0;
                 // Under 3 minutes the stopwatch becomes a red disc with a white running figure:
                 // same brightness inside, so that one is matched in color, inside its circle.
                 if (max < 0.7 && redTimer is { } red && !red.tpl.Empty())
@@ -1261,8 +1264,10 @@ public sealed class Engine : IDisposable
                     Cv2.MatchTemplate(area2, red.tpl, r2, TemplateMatchModes.CCoeffNormed, red.mask);
                     Cv2.PatchNaNs(r2, -1);
                     Cv2.Threshold(r2, r2, 1.0, 0, ThresholdTypes.TozeroInv);
-                    Cv2.MinMaxLoc(r2, out _, out double redMax, out _, out _);
-                    max = Math.Max(max, redMax);
+                    Cv2.MinMaxLoc(r2, out _, out double redMax, out _, out Point redAt);
+                    using var redPart = new Mat(area2, new Rect(redAt, red.tpl.Size()));
+                    using var redV = ValueChannel(redPart);
+                    if (Lit(redV, new Rect(0, 0, redV.Width, redV.Height))) max = Math.Max(max, redMax);
                 }
                 lastTimerScore = max;
                 // seen at 0.7, lost below 0.55: scores hover near 0.7 over bright floor, which flipped it
@@ -1473,8 +1478,23 @@ public sealed class Engine : IDisposable
         if (small.Width < hudTemplate.Width || small.Height < hudTemplate.Height) return true;
         using var res = new Mat();
         Cv2.MatchTemplate(small, hudTemplate, res, TemplateMatchModes.CCoeffNormed);
-        Cv2.MinMaxLoc(res, out _, out double max, out _, out _);
-        return max >= 0.7;
+        Cv2.MinMaxLoc(res, out _, out double max, out _, out Point at);
+        if (max < 0.7) return false;
+        // A dimmed Esc button (a fade to black, a loading screen fading in) matches as well as a lit one: not the HUD.
+        using var part = new Mat(small, new Rect(at, hudTemplate.Size()));
+        using var v = ValueChannel(part);
+        return Lit(v, new Rect(0, 0, v.Width, v.Height));
+    }
+
+    /// <summary>Is a matched HUD icon lit? Its white parts are 250+ (HSV value) in play, measured from the game's own
+    /// icons; a third of the way into a fade to black they are under 170.
+    static bool Lit(Mat value, Rect at)
+    {
+        at &= new Rect(0, 0, value.Width, value.Height);
+        if (at.Width <= 0 || at.Height <= 0) return false;
+        using var part = new Mat(value, at);
+        Cv2.MinMaxLoc(part, out _, out double brightest);
+        return brightest >= 170;
     }
     DateTime minimapTime;
     Mat? prevGray;      // last aligned map frame, small grayscale, for following pans

@@ -29,7 +29,13 @@ public sealed class GameLog
     public event Action<Place, bool>? Changed;
 
     static readonly Regex Connect = new(@"connect to worldx-[a-z]+-[a-z]+-([a-z]+)-", RegexOptions.Compiled);
-    bool interlink;               // in Interlink's dungeon rooms (see Line)
+    bool interlink;               // in Interlink's or Holo-Battle Sim's dungeon rooms (see Line)
+    // A dungeon area that would start a new run waits here until the game has had time to name an Interlink or
+    // Holo-Battle Sim scene (it does ~1 s after the area loads): each of their rooms used to count as an Egg Heist
+    // island until then, and a whole Holo-Battle Sim visit for good.
+    string? pendingId;
+    DateTime pendingAt;
+    static readonly TimeSpan PendingFor = TimeSpan.FromSeconds(3);
     static readonly Regex Scene = new(@"createVoxelScene new>>>id:(\S+)", RegexOptions.Compiled);
     // A homeland is "100-<player id>-550" (anyone's): nothing is read there for now (it is heavy on the game already)
     static readonly Regex HomelandId = new(@"^\d+-\d+-550$", RegexOptions.Compiled);
@@ -59,12 +65,12 @@ public sealed class GameLog
             {
                 // The game restarted and began a new log.
                 pos = 0; partial.Clear(); decoder.Reset();
-                server = islandId = sanctumId = null;
+                server = islandId = sanctumId = pendingId = null;
                 Set(Place.Unknown, false);
             }
             Available = true;
             if (pos == 0 && fs.Length > 8 << 20) pos = CatchUpStart(fs);
-            if (fs.Length == pos) { catchingUp = false; return; }
+            if (fs.Length == pos) { catchingUp = false; Settle(); return; }
             fs.Seek(pos, SeekOrigin.Begin);
             var bytes = new byte[Math.Min(fs.Length - pos, 4 << 20)];
             int n = fs.Read(bytes, 0, bytes.Length);
@@ -79,6 +85,7 @@ public sealed class GameLog
             foreach (var line in text.AsSpan(0, last).ToString().Split('\n'))
                 Line(line);
             if (pos >= fs.Length) catchingUp = false;
+            Settle();
         }
         catch (IOException) { /* the game is writing; next time */ }
         catch (UnauthorizedAccessException) { Available = false; }
@@ -118,13 +125,15 @@ public sealed class GameLog
         if (line.Contains("connect to worldx-") && Connect.Match(line) is { Success: true } c)
         {
             server = c.Groups[1].Value; // ms (login), line, singleworld, dungeon, ...
-            if (server != "dungeon") interlink = false;
+            if (server != "dungeon") { interlink = false; pendingId = null; }
             return;
         }
-        // Interlink rooms are dungeon areas too: the game names their scene (".._fb_bossrush..") in the same second
-        // the room loads. From then until the next non-dungeon server, nothing is Egg Heist.
-        if (line.Contains("fb_bossrush"))
+        // Interlink rooms and Holo-Battle Sim are dungeon areas too: the game names their scene (".._fb_bossrush..",
+        // ".._fb_roguelike..") about a second after the area loads. From then until the next non-dungeon server,
+        // nothing is Egg Heist.
+        if (line.Contains("fb_bossrush") || line.Contains("fb_roguelike"))
         {
+            pendingId = null;
             if (!interlink) { interlink = true; islandId = sanctumId = null; Set(Place.Elsewhere, false); }
             return;
         }
@@ -132,18 +141,34 @@ public sealed class GameLog
         string id = m.Groups[1].Value;
         if (server != "dungeon" || interlink)
         {
-            islandId = sanctumId = null;
+            islandId = sanctumId = pendingId = null;
             Set(HomelandId.IsMatch(id) ? Place.Homeland : Place.Elsewhere, false);
             return;
         }
+        // Another area loaded with no Interlink or Holo-Battle Sim scene named in between (they're named within a
+        // second): the waiting one was Egg Heist's island. (Reading the log back at startup, there's no waiting.)
+        if (pendingId != null)
+        {
+            if (id == pendingId) return;
+            Settle(force: true);
+        }
         if (islandId == null || (id != islandId && id != sanctumId && sanctumId != null))
         {
-            // First area of a run (runs start outside), or a third id: a new run.
-            islandId = id; sanctumId = null;
-            Set(Place.Island, true);
+            // First area of a run (runs start outside), or a third id: a new run, once no Interlink or Holo-Battle
+            // Sim scene follows (Settle). Until then the player is elsewhere.
+            if (pendingId != id) { pendingId = id; pendingAt = DateTime.UtcNow; }
+            Set(Place.Elsewhere, false);
         }
         else if (id == islandId) Set(Place.Island, false);
         else { sanctumId = id; Set(Place.Sanctum, false); }
+    }
+
+    /// <summary>A waiting dungeon area that no Interlink or Holo-Battle Sim scene followed: an Egg Heist run's island.</summary>
+    void Settle(bool force = false)
+    {
+        if (pendingId == null || (!force && DateTime.UtcNow - pendingAt < PendingFor)) return;
+        islandId = pendingId; sanctumId = null; pendingId = null;
+        Set(Place.Island, true);
     }
 
     void Set(Place p, bool newRun)
