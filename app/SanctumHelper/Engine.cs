@@ -462,6 +462,10 @@ public sealed class Engine : IDisposable
                     nextOcr = now + (onParty ? 500 : game.IsForeground ? 1000 : 1500);
                 }
                 if (!game.IsForeground) { HideMini(); Thread.Sleep(250); continue; }
+                // Out of Egg Heist (the game log has you back in Astra, the world or a homeland): the on-screen map is
+                // no longer updated below, so take down the last frame now. It stayed over Astra until the game lost
+                // focus (a player saw the Egg Heist map in Astra, 5 Nov).
+                if (!InEggHeist && miniShowing) { Log.Write("left Egg Heist: hiding the on-screen map"); HideMini(); }
                 // Faster while the on-screen map follows the player; tracking is cheap then.
                 // On the island there may be no Sanctum layout yet; it still needs fast updates.
                 // In a run with the layout still unknown too: that is when the run timer, the
