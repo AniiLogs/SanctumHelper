@@ -1233,6 +1233,39 @@ public sealed class Engine : IDisposable
     double lastTimerScore;
     bool lastTimerSeen;
 
+    // ---- Not Egg Heist after all? A Pathfinder challenge loads like an Egg Heist island (a dungeon area the game names
+    // no scene for) and has a countdown with the same stopwatch, so the island map popped up over one (7 Nov). Its HUD
+    // has a "Victory Conditions" panel just above the timer, which Egg Heist never shows: read that band once a second
+    // for the first 30 s of an island area while the timer is up.
+    string? challengeArea;
+    DateTime challengeAreaAt, nextChallengeRead;
+
+    void CheckChallenge(Mat small, DateTime now)
+    {
+        if (settings.ForcedLayout != 0 || !ocr.Available || gameLog.Where != GameLog.Place.Island || gameLog.RunId == null) return;
+        if (challengeArea != gameLog.RunId) { challengeArea = gameLog.RunId; challengeAreaAt = now; nextChallengeRead = now; }
+        if ((now - challengeAreaAt).TotalSeconds > 30 || now < nextChallengeRead) return;
+        nextChallengeRead = now.AddSeconds(1);
+        if (ChallengeText(ocr, small) is not string text) return;
+        Log.Write($"challenge on screen (\"{text}\"): not Egg Heist, hiding the maps");
+        gameLog.NotEggHeist();
+        onIsland = false;
+        islandTracker.Reset();
+        lastRunSeen = default;
+        HideMini();
+    }
+
+    /// <summary>The "Victory Conditions" title read in the HUD corner at 1080p size (x 45-295, y 295-335, measured on
+    /// a Pathfinder screen), or null when it isn't there. (Also run by --challenge-test on a saved screen.)</summary>
+    public static string? ChallengeText(OcrService ocr, Mat small)
+    {
+        var band = new Rect(20, 280, 300, 70).Intersect(new Rect(0, 0, small.Width, small.Height));
+        if (band.Width < 100 || band.Height < 30) return null;
+        using var part = new Mat(small, band);
+        string text = ocr.Read(part).ToLowerInvariant();
+        return text.Contains("victory") || text.Contains("condition") ? text : null;
+    }
+
     /// <param name="small">The HUD corner at 1080p size.</param>
     void UpdateInRun(Mat small)
     {
@@ -1289,6 +1322,7 @@ public sealed class Engine : IDisposable
             lastTimerSeen = seen;
             Log.Write($"run timer {(seen ? "seen" : "lost")} ({lastTimerScore:0.00})");
         }
+        if (seen) CheckChallenge(small, now);
         // Tracking the player on the island means we're in a run, timer or not.
         if (!seen && onIsland && islandTracker.Tracking) seen = true;
         if (seen)
