@@ -163,6 +163,18 @@ public sealed class GameLog
         else { sanctumId = id; Set(Place.Sanctum, false); }
     }
 
+    /// <summary>The screen showed what Egg Heist never has (a challenge's "Victory Conditions" panel): this dungeon area
+    /// isn't Egg Heist after all. A Pathfinder challenge loads like an island and names no scene in the log (7 Nov:
+    /// the island map popped up over one). Like an Interlink room, nothing is Egg Heist until the next non-dungeon
+    /// server.</summary>
+    public void NotEggHeist()
+    {
+        pendingId = null;
+        interlink = true;
+        islandId = sanctumId = null;
+        Set(Place.Elsewhere, false);
+    }
+
     /// <summary>A waiting dungeon area that no Interlink or Holo-Battle Sim scene followed: an Egg Heist run's island.</summary>
     void Settle(bool force = false)
     {

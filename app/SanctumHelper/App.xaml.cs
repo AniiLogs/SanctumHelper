@@ -55,6 +55,16 @@ public partial class App : Application
             Shutdown();
             return;
         }
+        if (e.Args.Length >= 3 && e.Args[0] == "--challenge-test")
+        {
+            // Developer check: does a saved 16:9 screen show a challenge's "Victory Conditions"? Writes the answer to a file.
+            using var shot = OpenCvSharp.Cv2.ImRead(e.Args[1]);
+            using var small = new OpenCvSharp.Mat();
+            OpenCvSharp.Cv2.Resize(shot, small, new OpenCvSharp.Size(), 1080.0 / shot.Height, 1080.0 / shot.Height, OpenCvSharp.InterpolationFlags.Area);
+            File.WriteAllText(e.Args[2], Engine.ChallengeText(new OcrService(), small) ?? "(none)");
+            Shutdown();
+            return;
+        }
         if (e.Args.Contains("--place-test"))
         {
             // Developer check of placement mode without the engine (works beside a running copy).
