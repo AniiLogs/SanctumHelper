@@ -121,6 +121,7 @@ public partial class App : Application
             return;
         }
         bool hostedMode = e.Args.Contains("--hosted");
+        if (e.Args.Contains("--dev")) Dev.LoadKept();   // a beta of aLogs: the switches a player chose to keep
         if (hostedMode) Hosted.Enable();
         single = new Mutex(true, @"Local\SanctumHelper.Single", out bool first);
         if (!first && hostedMode)

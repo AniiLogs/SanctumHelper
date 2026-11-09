@@ -5,14 +5,15 @@ using System.Linq;
 namespace SanctumHelper;
 
 /// <summary>Beta-only test switches, shown on the Dev tab of aLogs' Sanctum Helper page. Each one turns on a proposed change, so it
-/// can be tried alone. All off at every start and never saved, on purpose: a build can change what a switch does. With them all
-/// off, Sanctum Helper works as it did in 0.1.36. Before a real release, the ones kept become normal behaviour and the rest, with
-/// this file, come out.</summary>
+/// can be tried alone. All off at every start, on purpose: a build can change what a switch does. The one exception is a switch
+/// the player chose to keep (dev-keep.json): that starts on, through updates, until they unkeep it or it's marked ForcedOff here.
+/// With them all off, Sanctum Helper works as it did in 0.1.36. Before a real release, the ones used become normal behaviour and
+/// the rest, with this file, come out.</summary>
 public static class Dev
 {
     public const string NoRisk = "No known risk", LowRisk = "Low risk", HighRisk = "High risk";
 
-    public sealed record Option(string Id, string Section, string Area, string Title, string What, string Gain, string Risk, string Tested, Action<bool> Set);
+    public sealed record Option(string Id, string Section, string Area, string Title, string What, string Gain, string Risk, string Tested, Action<bool> Set, bool ForcedOff = false);
 
     // Read every frame or fix from several threads; a plain field read is all that's needed.
     public static bool ArtStrips, GcThread, DuplicateTick, LabelCache,
@@ -82,7 +83,7 @@ public static class Dev
     public static bool Set(string id, bool on)
     {
         var option = Options.FirstOrDefault(o => o.Id == id);
-        if (option == null) return false;
+        if (option == null || (on && option.ForcedOff)) return false;
         option.Set(on);
         lock (Lit) { if (on) Lit.Add(id); else Lit.Remove(id); }
         SanctumHelper.Log.Write($"dev: {id} {(on ? "on" : "off")}");
@@ -90,6 +91,47 @@ public static class Dev
     }
 
     static readonly HashSet<string> Lit = [];
+
+    // ---- Kept switches: the player's own choice to start one on. Only ever read on a beta (--dev from aLogs), so no real release
+    // can run a switch from an earlier beta's choice.
+    static readonly HashSet<string> Keeping = [];
+    static string KeepFile => System.IO.Path.Combine(Settings.Dir, "dev-keep.json");
+
+    /// <summary>At start: turns on what the player kept. A switch that's gone, or that the developer has forced off, is forgotten, so
+    /// it takes a new choice to keep it again.</summary>
+    public static void LoadKept()
+    {
+        string[] saved;
+        try { saved = System.Text.Json.JsonSerializer.Deserialize<string[]>(System.IO.File.ReadAllText(KeepFile)) ?? []; }
+        catch { return; }   // none yet, or unreadable: all off
+        lock (Keeping) foreach (var id in saved) if (Options.Any(o => o.Id == id && !o.ForcedOff)) Keeping.Add(id);
+        foreach (var id in Kept()) Set(id, true);
+        if (Kept().Length != saved.Length) SaveKept();
+    }
+
+    /// <summary>Keeping turns it on now as well; unkeeping leaves it as it is until the next start.</summary>
+    public static bool Keep(string id, bool keep)
+    {
+        var option = Options.FirstOrDefault(o => o.Id == id);
+        if (option == null || (keep && option.ForcedOff)) return false;
+        lock (Keeping) { if (keep) Keeping.Add(id); else Keeping.Remove(id); }
+        if (keep) Set(id, true);
+        SaveKept();
+        SanctumHelper.Log.Write($"dev: {id} {(keep ? "kept" : "no longer kept")}");
+        return true;
+    }
+
+    public static string[] Kept() { lock (Keeping) return Keeping.OrderBy(x => x).ToArray(); }
+
+    static void SaveKept()
+    {
+        try
+        {
+            System.IO.File.WriteAllText(KeepFile + ".tmp", System.Text.Json.JsonSerializer.Serialize(Kept()));
+            System.IO.File.Move(KeepFile + ".tmp", KeepFile, true);
+        }
+        catch (Exception e) { SanctumHelper.Log.Write("dev: saving kept switches: " + e.Message); }
+    }
 
     /// <summary>The switches on now.</summary>
     public static string[] On() { lock (Lit) return Lit.OrderBy(x => x).ToArray(); }
