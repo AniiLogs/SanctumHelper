@@ -414,12 +414,18 @@ public sealed class Engine : IDisposable
                     // world, hub, layout unknown), a whole window was copied ~60 times a second only to find that.
                     // (Open on the last tick: straight to the whole copy, whose map check runs again.)
                     bool mapOpen = !bigOk && doors.LastMapOpen;
+                    SharedCapture.StillScreen = true;
                     if (!mapOpen)
                         using (var head = Grab(MapTitleRect(c0)))
+                        {
+                            // no picture yet is not "the map is closed": look again next tick, what's up stays up
+                            if (noPicture) { Thread.Sleep(10); continue; }
                             mapOpen = MapScreenOpen(head, c0);
+                        }
                     if (mapOpen)
                     {
                         using var frame = Grab(new Rect(0, 0, c0.Width, c0.Height));
+                        if (noPicture) { Thread.Sleep(10); continue; }
                         ShowMap(frame);
                     }
                     else if (!bigOk) ShowMap(null);
@@ -435,6 +441,7 @@ public sealed class Engine : IDisposable
                     Thread.Sleep(Math.Max(1, left));
                     continue;
                 }
+                SharedCapture.StillScreen = false;
                 if (wasShowing)
                 {
                     Emit(new OverlayFrame(game.Client, false, CurrentLayout, null, null, false, EffectiveDifficulty, ""));
@@ -764,6 +771,8 @@ public sealed class Engine : IDisposable
     }
 
     /// <summary>A part of the game's client area (client coordinates).</summary>
+    bool noPicture;     // the last Grab had no picture from the app yet: what it gave is empty, and says nothing about the screen
+
     Mat Grab(Rect sub)
     {
         var c = game.Client;
@@ -773,6 +782,7 @@ public sealed class Engine : IDisposable
         if (SharedCapture.AppPresent)
         {
             var shared = SharedCapture.TryGrab(game.Handle, c.Width, c.Height, sub);
+            noPicture = shared == null;
             OwnOverlays.Tick();
             if (shared != null && SharedCapture.ScreenCopy)
             {
