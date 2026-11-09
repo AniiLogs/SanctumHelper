@@ -419,13 +419,14 @@ public sealed class Engine : IDisposable
                         using (var head = Grab(MapTitleRect(c0)))
                         {
                             // no picture yet is not "the map is closed": look again next tick, what's up stays up
-                            if (noPicture) { Thread.Sleep(10); continue; }
+                            if (noPicture) { wasShowing = true; Thread.Sleep(10); continue; }
                             mapOpen = MapScreenOpen(head, c0);
                         }
                     if (mapOpen)
                     {
                         using var frame = Grab(new Rect(0, 0, c0.Width, c0.Height));
-                        if (noPicture) { Thread.Sleep(10); continue; }
+                        if (noPicture) { wasShowing = true; Thread.Sleep(10); continue; }
+                        minimap.HoldStill();
                         ShowMap(frame);
                     }
                     else if (!bigOk) ShowMap(null);
@@ -771,6 +772,7 @@ public sealed class Engine : IDisposable
     }
 
     /// <summary>A part of the game's client area (client coordinates).</summary>
+    long lastMapPageLook = -10000;
     bool noPicture;     // the last Grab had no picture from the app yet: what it gave is empty, and says nothing about the screen
 
     Mat Grab(Rect sub)
@@ -891,6 +893,15 @@ public sealed class Engine : IDisposable
             // after half a second without either, so the on-screen map doesn't blink.
             if (lastTimerSeen || HudVisible(small)) { hudLastSeen = DateTime.UtcNow; hudVisible = true; }
             else if ((DateTime.UtcNow - hudLastSeen).TotalSeconds > 0.5) hudVisible = false;
+        }
+        // No run timer: maybe the map screen (M, or Select on a controller). Looked at four times a second, only while the timer's gone
+        if (!lastTimerSeen && clock.ElapsedMilliseconds - lastMapPageLook >= 250)
+        {
+            lastMapPageLook = clock.ElapsedMilliseconds;
+            SharedCapture.StillScreen = true;
+            using var head = Grab(MapTitleRect(c));
+            SharedCapture.StillScreen = false;
+            if (!noPicture && MapScreenOpen(head, c)) minimap.HoldStill();
         }
         if (!InRun) return;
         // A chest, shop or other screen covering the HUD (timer match ~0.27 under it, vs 0.65+
