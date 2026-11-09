@@ -1263,7 +1263,8 @@ public sealed class Engine : IDisposable
         if (band.Width < 100 || band.Height < 30) return null;
         using var part = new Mat(small, band);
         string text = ocr.Read(part).ToLowerInvariant();
-        return text.Contains("victory") || text.Contains("condition") ? text : null;
+        // ("victory", not "condition": Egg Heist's own panel there is "Escape Condition", and every run counted as a challenge, 8 Nov)
+        return text.Contains("victory") ? text : null;
     }
 
     /// <param name="small">The HUD corner at 1080p size.</param>
