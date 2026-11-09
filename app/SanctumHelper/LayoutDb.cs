@@ -58,6 +58,8 @@ public sealed class Layout
     [JsonPropertyName("layout")] public int Number { get; set; }
     /// <summary>"island" for the team-mode island around the Sanctum; empty for Sanctum layouts.</summary>
     public string Kind { get; set; } = "";
+    /// <summary>The game's minimap zoom: [default, inside a custom area] (scene_data.miniMapImageScale).</summary>
+    public double[]? MiniMapImageScale { get; set; }
     [JsonIgnore] public bool IsIsland => Kind == "island";
     public List<string> Difficulties { get; set; } = [];
     public string Image { get; set; } = "";
