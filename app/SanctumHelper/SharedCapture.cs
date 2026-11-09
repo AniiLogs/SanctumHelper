@@ -59,6 +59,11 @@ public static class SharedCapture
     /// <summary>Set false to never use the shared frame.</summary>
     public static bool Enabled { get; set; } = true;
 
+    /// <summary>The in-game map page is being read: it hardly changes, so Desktop Duplication has few new pictures of it, and one
+    /// over 100 ms old is still that page. (Refused, the page read as closed, and the map came and went, 9 Nov.)</summary>
+    public static volatile bool StillScreen;
+    const long StillAgeMs = 1500;
+
     /// <summary>The aLogs app is running and sharing its capture: then pictures come only from it, and we wait for
     /// its next one instead of copying the window ourselves.</summary>
     public static bool AppPresent
@@ -245,7 +250,7 @@ public static class SharedCapture
                 if ((flags & 1) == 0 || U16(at + 56) != clientW || U16(at + 58) != clientH) return null;
                 if (Marshal.ReadByte(basePtr, at + 61) > 1) return null;   // shrunk: not what we asked for
                 // Too old: no picture this time (accepted up to 100 ms, or two of our intervals).
-                if (now - I64(at + 24) > Math.Max(100, 2 * interval)) return null;
+                if (now - I64(at + 24) > Math.Max(StillScreen ? StillAgeMs : 100, 2 * interval)) return null;
                 int offset = (int)U32(at + 32), stride = (int)U32(at + 36);
                 var pic = new Rect(U16(at + 40), U16(at + 42), U16(at + 44), U16(at + 46));
                 if (pic.Intersect(sub) != sub) return null;                // a picture of an older, smaller box
