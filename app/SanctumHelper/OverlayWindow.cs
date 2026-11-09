@@ -121,9 +121,22 @@ public sealed class OverlayWindow : Window
             lastTopmost = Environment.TickCount64;
             Native.SetWindowPos(hwnd, Native.HWND_TOPMOST, 0, 0, 0, 0, 0x1 | 0x2 | Native.SWP_NOACTIVATE);
         }
+        // Where the player and their facing show is drawn from what the view's own animation holds, and that redraws when it
+        // moves: a frame that only brings newer readings needs no redraw of its own (standing still, these were ~38 a second
+        // of a window copied whole). Settings reach the map only through a redraw, so one still comes every 250 ms.
+        var before = view.Frame;
         view.Frame = f;
+        bool egg = HeadingFeed.Egg;
+        long nowMs = Environment.TickCount64;
+        bool sameLook = before != null && f is { Mini: true, Visible: true, Player: not null } && before.Player != null && egg == lastEgg && nowMs - lastRedraw < 250
+            && before with { Player = f.Player, PlayerFresh = f.PlayerFresh, Heading = f.Heading, Velocity = f.Velocity, Stamp = f.Stamp, Camera = f.Camera } == f;
+        lastEgg = egg;
+        if (sameLook) return;
+        lastRedraw = nowMs;
         view.InvalidateVisual();
     }
+    long lastRedraw;
+    bool lastEgg;
 
     // ---- Placement mode: the user drags the on-screen map where they want it. The overlay is
     // normally click-through (WS_EX_TRANSPARENT); while placing it takes the mouse, but only
@@ -361,12 +374,19 @@ public sealed class OverlayView : FrameworkElement
     }
     DateTime lastTick = DateTime.UtcNow;
 
+    TimeSpan lastRenderTime;
+    int shownLayout;
+
     void Animate(object? sender, EventArgs e)
     {
+        // WPF can raise this more than once for a display frame: nothing new to show the second time.
+        if (e is RenderingEventArgs re) { if (re.RenderingTime == lastRenderTime) return; lastRenderTime = re.RenderingTime; }
         var now = DateTime.UtcNow;
         double dt = Math.Min(0.1, (now - lastTick).TotalSeconds);
         lastTick = now;
         if (Frame is not { Mini: true, Visible: true, Player: OpenCvSharp.Point2d fix } fr) { shown = null; shownHeading = shownCamera = null; return; }
+        // A different map's coordinates aren't a walk: start from the new spot, however close the numbers are.
+        if (fr.Layout?.Number is int onMap && onMap != shownLayout) { shownLayout = onMap; shown = null; }
         var (liveHeading, liveCamera, liveStamp) = HeadingFeed.Get();
         bool live = (now - liveStamp).TotalSeconds < 1.5;
         // ~15 ms (was 35): readings now come ~60 a second already smoothed, so this only bridges
@@ -1280,14 +1300,33 @@ public sealed class OverlayView : FrameworkElement
         Label(dc, text, new Point(p.X, p.Y + size * 0.78), c, 13 * ms, above: false);
     }
 
+    // Laying text out and tracing its outline was the costliest part of a frame, for labels that rarely change.
+    [ThreadStatic] static Dictionary<(string, double, Color, bool), Drawing>? labels;
+
+    static Drawing LabelDrawing(string text, Color color, double size, bool above)
+    {
+        var cache = labels ??= new();
+        if (cache.TryGetValue((text, size, color, above), out var made)) return made;
+        if (cache.Count >= 256) cache.Clear();   // (radar distances keep changing)
+        var ft = new FormattedText(text, CultureInfo.InvariantCulture, FlowDirection.LeftToRight, Face, Math.Max(9, size), new SolidColorBrush(color), 1.0);
+        var origin = new Point(-ft.Width / 2, above ? -ft.Height : 0);
+        var group = new DrawingGroup();
+        using (var dc = group.Open())
+        {
+            dc.DrawGeometry(null, new Pen(new SolidColorBrush(Color.FromArgb(220, 0, 0, 0)), Math.Max(2.5, size / 4)) { LineJoin = PenLineJoin.Round }, ft.BuildGeometry(origin));
+            dc.DrawText(ft, origin);
+        }
+        group.Freeze();
+        return cache[(text, size, color, above)] = group;
+    }
+
     static void Label(DrawingContext dc, string text, Point at, Color color, double size, bool above)
     {
-        var ft = new FormattedText(text, CultureInfo.InvariantCulture, FlowDirection.LeftToRight, Face, Math.Max(9, size), new SolidColorBrush(color), 1.0);
-        var origin = new Point(at.X - ft.Width / 2, above ? at.Y - ft.Height : at.Y);
-        var outline = ft.BuildGeometry(origin);
+        var drawing = LabelDrawing(text, color, size, above);
         if (spin != 0) dc.PushTransform(new RotateTransform(spin, at.X, at.Y));
-        dc.DrawGeometry(null, new Pen(new SolidColorBrush(Color.FromArgb(220, 0, 0, 0)), Math.Max(2.5, size / 4)) { LineJoin = PenLineJoin.Round }, outline);
-        dc.DrawText(ft, origin);
+        dc.PushTransform(new TranslateTransform(at.X, at.Y));
+        dc.DrawDrawing(drawing);
+        dc.Pop();
         if (spin != 0) dc.Pop();
     }
 

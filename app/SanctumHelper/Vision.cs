@@ -20,57 +20,68 @@ public sealed class MapArt : IDisposable
     public Mat Gray { get; }
     public Mat Alpha { get; }
     /// <summary>Color art on the map's dark background (made on first use).</summary>
-    public Mat Bgr => bgr ??= MakeBgr();
-    Mat? bgr;
+    public Mat Bgr { get { if (bgr != null) return bgr; lock (bgrGate) return bgr ??= MakeBgr(); } }
+    /// <summary>The color art is ready to use without waiting.</summary>
+    public bool BgrMade => bgr != null;
+    volatile Mat? bgr;
+    readonly object bgrGate = new();
     readonly string path;
     readonly int padW, padH;
 
     public MapArt(string path, int width = 0, int height = 0)
     {
         this.path = path; padW = width; padH = height;
-        using var raw = Cv2.ImRead(path, ImreadModes.Unchanged);
         // Upper-floor images can be cropped at the bottom/right (empty tiles not shipped): pad
         // them to the ground floor's size so all floors share coordinates.
-        using var rgba = new Mat();
-        Cv2.CopyMakeBorder(raw, rgba, 0, Math.Max(0, height - raw.Height), 0, Math.Max(0, width - raw.Width), BorderTypes.Constant, Scalar.All(0));
+        using var rgba = ReadPadded();
         var ch = rgba.Split();
         Alpha = ch[3].Clone();
-        using var bgr = new Mat();
-        Cv2.Merge([ch[0], ch[1], ch[2]], bgr);
         using var g = new Mat();
-        Cv2.CvtColor(bgr, g, ColorConversionCodes.BGR2GRAY);
-        Gray = new Mat();
-        // a = alpha/255; gray = g * a + bg * (1 - a), bg ~ the map panel's near-black
-        using var a = new Mat();
-        Alpha.ConvertTo(a, MatType.CV_32F, 1 / 255.0);
-        using var gf = new Mat();
-        g.ConvertTo(gf, MatType.CV_32F);
-        Cv2.Subtract(gf, new Scalar(20), gf);
-        Cv2.Multiply(gf, a, gf);
-        Cv2.Add(gf, new Scalar(20), gf);
-        gf.ConvertTo(Gray, MatType.CV_8U);
+        Cv2.CvtColor(rgba, g, ColorConversionCodes.BGRA2GRAY);
+        Gray = OnBackground(g, Alpha);
         foreach (var c in ch) c.Dispose();
+    }
+
+    Mat ReadPadded()
+    {
+        var raw = Cv2.ImRead(path, ImreadModes.Unchanged);
+        if (raw.Height >= padH && raw.Width >= padW) return raw;
+        var rgba = new Mat();
+        Cv2.CopyMakeBorder(raw, rgba, 0, Math.Max(0, padH - raw.Height), 0, Math.Max(0, padW - raw.Width), BorderTypes.Constant, Scalar.All(0));
+        raw.Dispose();
+        return rgba;
+    }
+
+    /// <summary>a = alpha/255; out = channel * a + bg * (1 - a), bg ~ the map panel's near-black. A strip at a time: the island is
+    /// 25 million pixels, and floats of all of them at once took 200 MB for each channel.</summary>
+    static Mat OnBackground(Mat channel, Mat alpha)
+    {
+        const int Strip = 256;
+        var result = new Mat(channel.Size(), MatType.CV_8U);
+        using var a = new Mat();
+        using var f = new Mat();
+        for (int y = 0; y < channel.Rows; y += Strip)
+        {
+            var row = new Rect(0, y, channel.Cols, Math.Min(Strip, channel.Rows - y));
+            using var c = new Mat(channel, row);
+            using var al = new Mat(alpha, row);
+            using var o = new Mat(result, row);
+            al.ConvertTo(a, MatType.CV_32F, 1 / 255.0);
+            c.ConvertTo(f, MatType.CV_32F);
+            Cv2.Subtract(f, new Scalar(20), f);
+            Cv2.Multiply(f, a, f);
+            Cv2.Add(f, new Scalar(20), f);
+            f.ConvertTo(o, MatType.CV_8U);
+        }
+        return result;
     }
 
     Mat MakeBgr()
     {
-        using var raw = Cv2.ImRead(path, ImreadModes.Unchanged);
-        using var rgba = new Mat();
-        Cv2.CopyMakeBorder(raw, rgba, 0, Math.Max(0, padH - raw.Height), 0, Math.Max(0, padW - raw.Width), BorderTypes.Constant, Scalar.All(0));
+        using var rgba = ReadPadded();
         var ch = rgba.Split();
-        using var a = new Mat();
-        ch[3].ConvertTo(a, MatType.CV_32F, 1 / 255.0);
         var outCh = new Mat[3];
-        for (int i = 0; i < 3; i++)
-        {
-            using var f = new Mat();
-            ch[i].ConvertTo(f, MatType.CV_32F);
-            Cv2.Subtract(f, new Scalar(20), f);
-            Cv2.Multiply(f, a, f);
-            Cv2.Add(f, new Scalar(20), f);
-            outCh[i] = new Mat();
-            f.ConvertTo(outCh[i], MatType.CV_8U);
-        }
+        for (int i = 0; i < 3; i++) outCh[i] = OnBackground(ch[i], ch[3]);
         var m = new Mat();
         Cv2.Merge(outCh, m);
         foreach (var c in ch) c.Dispose();
@@ -94,6 +105,9 @@ public sealed class MapArtCache(LayoutDb db)
 
     /// <summary>How many floor images are loaded.</summary>
     public int Loaded => art.Count;
+
+    /// <summary>This map's color art is loaded and ready, so using it won't hold anything up.</summary>
+    public bool BgrReady(Layout l) => art.TryGetValue((l.Number, 0), out var a) && a.BgrMade;
 }
 
 /// <summary>Freeing per-layout images. They're OpenCV memory the .NET garbage collector doesn't see, so a cache
@@ -454,6 +468,9 @@ public sealed class MinimapTracker(MapArtCache arts)
     // Full searches run at half resolution; tracking near a known spot at full resolution,
     // which keeps the fit precise (less jitter).
     const double SearchWork = 0.5, TrackWork = 1.0;
+    // The first look right after a good fix: this far (art px) around where the player should be, and how clear its peak must be.
+    const int Near = 30;
+    const double NearScore = 0.6;
     // Measured 0.60 minimap px per map-art px at 1080p on live frames (layouts 53 and 58).
     static readonly double[] SearchScales = [0.56, 0.58, 0.6, 0.62, 0.64];
     readonly ConcurrentDictionary<(int, int, double, double), Mat> artFloor = new();
@@ -610,6 +627,11 @@ public sealed class MinimapTracker(MapArtCache arts)
         // matches well, the others are only tried every 45 ms, about as often as fixes used to come.
         bool allFloors = true;
         bool othersDue = (DateTime.UtcNow - otherFloorsAt).TotalSeconds >= 0.045;
+        // Right after a good fix, the current floor is first looked at just around where the player should be now (a fraction of
+        // the cost); a clear peak inside that settles it, anything else looks at the whole neighbourhood as before.
+        bool nearFirst = tracking && scale != null && (DateTime.UtcNow - lastOk).TotalSeconds < 0.5;
+        double ahead = Math.Clamp((DateTime.UtcNow - filterTime).TotalSeconds, 0.005, 0.5);
+        Point2d soon = tracking ? new Point2d(last!.Value.X + vel.X * ahead, last.Value.Y + vel.Y * ahead) : default;
         foreach (var fl in Enumerable.Range(0, floors).OrderBy(x => x == Floor ? 0 : 1))
         foreach (var s in scales)
         {
@@ -617,7 +639,31 @@ public sealed class MinimapTracker(MapArtCache arts)
             var map = ArtFloor(layout, fl, s, Work);
             double kk = s * Work; // art px -> work px
             var roi = new Rect(0, 0, map.Width, map.Height);
-            if (tracking)
+            using var res = new Mat();
+            double max = 0;
+            Point loc = default;
+            bool settled = false;
+            // All floors share coordinates, so while the current one clearly matches, another is only compared right there too:
+            // stairs keep the player's spot. (A current floor that stops matching still has every floor searched widely.)
+            bool otherHere = nearFirst && fl != Floor && best is { } now0 && now0.fl == Floor && now0.score >= NearScore;
+            if (nearFirst && (fl == Floor || otherHere))
+            {
+                int near = (int)(Near * kk);
+                var close = new Rect((int)(soon.X * kk) - near - tpl.Width / 2, (int)(soon.Y * kk) - near - tpl.Height / 2,
+                    2 * near + tpl.Width, 2 * near + tpl.Height).Intersect(roi);
+                if (close.Width > tpl.Width + 2 && close.Height > tpl.Height + 2)
+                {
+                    using var nearby = new Mat(map, close);
+                    match.Match(nearby, res);
+                    Cv2.PatchNaNs(res, -1);
+                    Cv2.Threshold(res, res, 1.0, 0, ThresholdTypes.TozeroInv);
+                    Cv2.Max(res, new Scalar(-1), res);
+                    Cv2.MinMaxLoc(res, out _, out max, out _, out loc);
+                    settled = otherHere || (max >= NearScore && loc.X > 0 && loc.Y > 0 && loc.X < res.Width - 1 && loc.Y < res.Height - 1);
+                    if (settled) roi = close;
+                }
+            }
+            if (tracking && !settled)
             {
                 // ~20 m around the last fix, growing while lost (players keep moving in menus/fades).
                 double lost = Math.Min(8, (DateTime.UtcNow - (lastOk > seededAt ? lastOk : seededAt)).TotalSeconds);
@@ -625,15 +671,17 @@ public sealed class MinimapTracker(MapArtCache arts)
                 roi = new Rect((int)(last!.Value.X * kk) - half - tpl.Width / 2, (int)(last.Value.Y * kk) - half - tpl.Height / 2,
                     2 * half + tpl.Width, 2 * half + tpl.Height).Intersect(roi);
             }
-            if (roi.Width <= tpl.Width || roi.Height <= tpl.Height) continue;
-            using var sub = new Mat(map, roi);
-            using var res = new Mat();
-            match.Match(sub, res);
-            // Flat windows divide by ~0 and give NaN/±Inf: treat them as no match.
-            Cv2.PatchNaNs(res, -1);
-            Cv2.Threshold(res, res, 1.0, 0, ThresholdTypes.TozeroInv);
-            Cv2.Max(res, new Scalar(-1), res);
-            Cv2.MinMaxLoc(res, out _, out double max, out _, out Point loc);
+            if (!settled)
+            {
+                if (roi.Width <= tpl.Width || roi.Height <= tpl.Height) continue;
+                using var sub = new Mat(map, roi);
+                match.Match(sub, res);
+                // Flat windows divide by ~0 and give NaN/±Inf: treat them as no match.
+                Cv2.PatchNaNs(res, -1);
+                Cv2.Threshold(res, res, 1.0, 0, ThresholdTypes.TozeroInv);
+                Cv2.Max(res, new Scalar(-1), res);
+                Cv2.MinMaxLoc(res, out _, out max, out _, out loc);
+            }
             // Sub-pixel peak (parabola through the neighbours).
             double sx = 0, sy = 0;
             if (loc.X > 0 && loc.X < res.Width - 1)
@@ -1158,6 +1206,9 @@ public sealed class IslandTracker(MapArtCache arts)
     // Color matching: the island art's colors (grass, sand, sea, paths) are what make places
     // tell apart; greyscale lost to the view cone in rainy green views (0.56 vs 0.60 in color).
     const double SearchWork = 0.35, TrackWork = 0.7;
+    // The first look right after a good fix: this far (art px) around where the player should be, and how clear its peak must be.
+    const int Near = 30;
+    const double NearScore = 0.5;
     // The island minimap is always drawn at 1.2x the map art: 504 of ~580 logged fixes were at
     // 1.20, and the 1.10 / 1.30 ones were look-alike places. Only that zoom is searched.
     static readonly double[] SearchScales = [1.2];
@@ -1172,14 +1223,40 @@ public sealed class IslandTracker(MapArtCache arts)
     public string LastInfo { get; private set; } = "";
     public bool Tracking => last != null && (DateTime.UtcNow - lastOk).TotalSeconds < 20;
     public Point2d Velocity => vel;
+    // Tracking's piece of the island, scaled once and cut from until the player walks near its edge (each fix used to scale its own).
+    Mat? tile;
+    Rect tileSrc;
+    double tileK;
+    DateTime wideNext;
 
-    public void Reset() { scale = null; last = null; vel = default; }
+    public void Reset() { scale = null; last = null; vel = default; wideNext = default; }
 
     /// <summary>Lets the resized island art go (about 13 MB; it was kept until Sanctum Helper closed).</summary>
-    public void Release() => Later.Dispose(Later.Take(art, _ => false));
+    public void Release()
+    {
+        Later.Dispose(Later.Take(art, _ => false));
+        if (tile != null) { Later.Dispose(new List<Mat> { tile }); tile = null; }
+    }
+
+    /// <summary>The scaled piece of the island holding `need` (art px), cut again only when `need` leaves it or the zoom changes.</summary>
+    Mat Tile(Mat full, Rect need, double kk)
+    {
+        var whole = new Rect(0, 0, full.Width, full.Height);
+        need = need.Intersect(whole);
+        if (tile == null || tileK != kk || !tileSrc.Contains(need))
+        {
+            const int Spare = 200;   // art px: about 3 s of walking before it's cut again (~3 ms)
+            var src = new Rect(need.X - Spare, need.Y - Spare, need.Width + 2 * Spare, need.Height + 2 * Spare).Intersect(whole);
+            var made = new Mat();
+            using (var part = new Mat(full, src)) Cv2.Resize(part, made, new Size(), kk, kk, InterpolationFlags.Area);
+            tile?.Dispose();
+            tile = made; tileSrc = src; tileK = kk;
+        }
+        return tile;
+    }
 
     /// <summary>Start from a known spot (the arrow on the full island map).</summary>
-    public void Seed(Point2d pos) { last = pos; vel = default; lastOk = filterTime = DateTime.UtcNow; }
+    public void Seed(Point2d pos) { last = pos; vel = default; lastOk = filterTime = DateTime.UtcNow; wideNext = default; }
 
     Mat Art(Layout island, double s, double work) => art.GetOrAdd((s, work), _ =>
     {
@@ -1194,6 +1271,10 @@ public sealed class IslandTracker(MapArtCache arts)
     {
         bool tracking = Tracking;
         if (!tracking && !allowFullSearch) return null;
+        // Lost for a while, a look covers a wide area and takes up to half a second: never more than a quarter of the time,
+        // or this thread does nothing else until the player is found again.
+        if (tracking && DateTime.UtcNow < wideNext) return null;
+        long lookStart = System.Diagnostics.Stopwatch.GetTimestamp();
         double work = tracking && scale != null ? TrackWork : SearchWork;
         using var small = new Mat();
         Cv2.Resize(minimapBgr, small, new Size(), work / uiScale, work / uiScale, InterpolationFlags.Area);
@@ -1230,30 +1311,58 @@ public sealed class IslandTracker(MapArtCache arts)
             double kk = s * work;
             Mat map;
             Rect roi;
-            Mat? owned = null;
+            using var res = new Mat();
+            double max = 0;
+            Point loc = default;
             if (tracking)
             {
-                // Only the neighbourhood, cut from the full-resolution art and scaled on the fly.
+                // Only the neighbourhood. Right after a good fix, first just around where the player should be now (a third of
+                // the cost); a clear peak inside that settles it, anything else looks at the whole neighbourhood as before.
+                using var match = new MaskedTemplate(gray, mask);
                 var full = arts.Get(island).Bgr;
                 double lost = Math.Min(8, (DateTime.UtcNow - lastOk).TotalSeconds);
-                int halfArt = (int)(100 + 60 * lost + gray.Width / 2.0 / kk);
-                var src = new Rect((int)last!.Value.X - halfArt, (int)last.Value.Y - halfArt, 2 * halfArt, 2 * halfArt).Intersect(new Rect(0, 0, full.Width, full.Height));
-                owned = new Mat();
-                using (var part = new Mat(full, src)) Cv2.Resize(part, owned, new Size(), kk, kk, InterpolationFlags.Area);
-                map = owned;
-                roi = new Rect(0, 0, map.Width, map.Height);
+                double ahead = Math.Clamp((DateTime.UtcNow - filterTime).TotalSeconds, 0.005, 0.5);
+                int reach = (int)(100 + 60 * lost), halfArt = (int)(reach + gray.Width / 2.0 / kk);
+                int nearArt = (int)(Near + gray.Width / 2.0 / kk);
+                Point2d here = last!.Value, soon = new(here.X + vel.X * ahead, here.Y + vel.Y * ahead);
+                var need = new Rect((int)here.X - halfArt, (int)here.Y - halfArt, 2 * halfArt, 2 * halfArt);
+                map = Tile(full, need, kk);
                 // Positions below are in "scaled full map" units: shift by the crop origin.
-                cropX = src.X * kk; cropY = src.Y * kk;
+                cropX = tileSrc.X * kk; cropY = tileSrc.Y * kk;
+                var inTile = new Rect(0, 0, map.Width, map.Height);
+                Rect Window(Point2d at, int half) => new Rect((int)((at.X - half - tileSrc.X) * kk), (int)((at.Y - half - tileSrc.Y) * kk), (int)(2 * half * kk), (int)(2 * half * kk)).Intersect(inTile);
+                bool settled = false;
+                roi = default;
+                if (lost < 0.5 && scale != null)
+                {
+                    roi = Window(soon, nearArt);
+                    if (roi.Width > gray.Width + 2 && roi.Height > gray.Height + 2)
+                    {
+                        using (var part = new Mat(map, roi)) match.Match(part, res);
+                        Cv2.PatchNaNs(res, -1);
+                        Cv2.Threshold(res, res, 1.0, 0, ThresholdTypes.TozeroInv);
+                        Cv2.Max(res, new Scalar(-1), res);
+                        Cv2.MinMaxLoc(res, out _, out max, out _, out loc);
+                        settled = max >= NearScore && loc.X > 0 && loc.Y > 0 && loc.X < res.Width - 1 && loc.Y < res.Height - 1;
+                    }
+                }
+                if (!settled)
+                {
+                    roi = Window(here, halfArt);
+                    if (roi.Width <= gray.Width || roi.Height <= gray.Height) continue;
+                    using (var part = new Mat(map, roi)) match.Match(part, res);
+                }
             }
-            else { map = Art(island, s, work); roi = new Rect(0, 0, map.Width, map.Height); cropX = cropY = 0; }
-            if (roi.Width <= gray.Width || roi.Height <= gray.Height) { owned?.Dispose(); continue; }
-            using var res = new Mat();
-            using (var part = new Mat(map, roi)) Cv2.MatchTemplate(part, gray, res, TemplateMatchModes.CCoeffNormed, mask);
-            owned?.Dispose();
+            else
+            {
+                map = Art(island, s, work); roi = new Rect(0, 0, map.Width, map.Height); cropX = cropY = 0;
+                if (roi.Width <= gray.Width || roi.Height <= gray.Height) continue;
+                using (var part = new Mat(map, roi)) Cv2.MatchTemplate(part, gray, res, TemplateMatchModes.CCoeffNormed, mask);
+            }
             Cv2.PatchNaNs(res, -1);
             Cv2.Threshold(res, res, 1.0, 0, ThresholdTypes.TozeroInv);
             Cv2.Max(res, new Scalar(-1), res);
-            Cv2.MinMaxLoc(res, out _, out double max, out _, out Point loc);
+            Cv2.MinMaxLoc(res, out _, out max, out _, out loc);
             if (!tracking)
             {
                 // Shortlist the best few spots for a sharper second look.
@@ -1309,6 +1418,8 @@ public sealed class IslandTracker(MapArtCache arts)
         var b = best.Value;
         LastScore = b.score;
         LastInfo = $"island {b.score:0.00} (2nd {b.second:0.00}) at ({b.p.X:0},{b.p.Y:0}) s{b.s:0.00}";
+        if (tracking && (DateTime.UtcNow - lastOk).TotalSeconds >= 1)
+            wideNext = DateTime.UtcNow.AddTicks((System.Diagnostics.Stopwatch.GetTimestamp() - lookStart) * 3 * TimeSpan.TicksPerSecond / System.Diagnostics.Stopwatch.Frequency);
         var now = DateTime.UtcNow;
         double dt = Math.Clamp((now - filterTime).TotalSeconds, 0.005, 0.5);
         // Only ever run when the minimap clearly shows the island, so the bar can be lower than
