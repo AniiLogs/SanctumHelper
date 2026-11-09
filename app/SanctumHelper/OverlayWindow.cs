@@ -353,8 +353,27 @@ public sealed class OverlayView : FrameworkElement
             if (value == animating) return;
             animating = value;
             if (value) { lastTick = DateTime.UtcNow; CompositionTarget.Rendering += Animate; }
-            else { CompositionTarget.Rendering -= Animate; shown = null; shownHeading = shownCamera = null; }
+            else
+            {
+                CompositionTarget.Rendering -= Animate; shown = null; shownHeading = shownCamera = null;
+                if (Dev.FreeIdle) FreeLater();
+            }
         }
+    }
+
+    System.Windows.Threading.DispatcherTimer? freeTimer;
+
+    /// <summary>The map still hidden 90 s from now: lets go of its pictures, decoded again when next shown.</summary>
+    void FreeLater()
+    {
+        freeTimer?.Stop();
+        freeTimer = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromSeconds(90) };
+        freeTimer.Tick += (_, _) =>
+        {
+            freeTimer?.Stop();
+            if (!animating && Frame is not { Visible: true }) { images.Clear(); outlines.Clear(); }
+        };
+        freeTimer.Start();
     }
 
     // The on-screen map glides toward each new position instead of jumping between fixes.

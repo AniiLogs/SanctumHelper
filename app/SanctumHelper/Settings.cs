@@ -172,7 +172,28 @@ public static class Log
     static readonly object Gate = new();
     public static string FilePath => Path.Combine(Settings.Dir, "log.txt");
 
+    static readonly System.Collections.Concurrent.BlockingCollection<string> Queue = new();
+    static System.Threading.Thread? writer;
+
     public static void Write(string msg)
+    {
+        if (Dev.LogThread)
+        {
+            lock (Gate) writer ??= StartWriter();
+            Queue.Add($"{DateTime.Now:HH:mm:ss.fff} {msg}");
+            return;
+        }
+        Save($"{DateTime.Now:HH:mm:ss.fff} {msg}");
+    }
+
+    static System.Threading.Thread StartWriter()
+    {
+        var t = new System.Threading.Thread(() => { foreach (var line in Queue.GetConsumingEnumerable()) Save(line); }) { IsBackground = true, Name = "SanctumHelper log" };
+        t.Start();
+        return t;
+    }
+
+    static void Save(string line)
     {
         lock (Gate)
         {
@@ -181,7 +202,7 @@ public static class Log
                 Directory.CreateDirectory(Settings.Dir);
                 var fi = new FileInfo(FilePath);
                 if (fi.Exists && fi.Length > 2_000_000) fi.Delete();
-                File.AppendAllText(FilePath, $"{DateTime.Now:HH:mm:ss.fff} {msg}{Environment.NewLine}");
+                File.AppendAllText(FilePath, line + Environment.NewLine);
             }
             catch { /* logging must never crash the app */ }
         }

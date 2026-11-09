@@ -565,6 +565,17 @@ public sealed class Engine : IDisposable
                 long grabbed = Environment.TickCount64;
                 var top = SharedCapture.AppPresent ? SharedCapture.TryGrab(game.Handle, c.Width, c.Height, corner) : ScreenPart(corner);
                 if (top == null) { Thread.Sleep(4); continue; }   // no fresh shared frame yet
+                if (SharedCapture.AppPresent && Dev.SkipRepeat && SharedCapture.LastPicture == headingPicture && HasSharedCorner(top))
+                {
+                    // The same picture again: nothing new to read. Still current, so tracking's timers keep running from it.
+                    top.Dispose();
+                    lock (cornerGate) sharedCornerAt = grabbed;
+                    int rest = HeadingPeriodMs - (int)(sw.ElapsedMilliseconds - t0);
+                    if (rest > 0) Thread.Sleep(rest);
+                    continue;
+                }
+                headingPicture = SharedCapture.LastPicture;
+                if (SharedCapture.AppPresent && Dev.PictureAge) grabbed -= Math.Clamp(SharedCapture.LastAgeMs, 0, 200);
                 if (SharedCapture.AppPresent && SharedCapture.ScreenCopy) top = Clean(top, corner);
                 lock (cornerGate) { sharedCorner?.Dispose(); sharedCorner = top; sharedCornerAt = grabbed; sharedCornerSeq++; }
                 cornerReady.Set();   // the tracking loop picks it up right away instead of on its next tick
@@ -581,6 +592,9 @@ public sealed class Engine : IDisposable
             if (left > 0) Thread.Sleep(left);
         }
     }
+
+    (int at, long seq) headingPicture;
+    bool HasSharedCorner(Mat like) { lock (cornerGate) return sharedCorner != null && sharedCorner.Size() == like.Size(); }
 
     readonly object cornerGate = new();
     readonly AutoResetEvent cornerReady = new(false);
@@ -626,14 +640,15 @@ public sealed class Engine : IDisposable
         // Facing: the yellow arrow when it shows; otherwise (twined with an egg, the egg marker
         // replaces it) the white view cone, i.e. where the camera looks. While the arrow is
         // missing it is only retried twice a second, as its full search is the costly part.
-        double? hint = heading is double hp && (now - headingTime).TotalSeconds < 0.5 && headingFromArrow ? hp : null;
+        bool arrowJustSeen = Dev.ArrowRetry && (now - lastArrowSeen).TotalSeconds < 0.5;
+        double? hint = heading is double hp && (now - headingTime).TotalSeconds < 0.5 && (headingFromArrow || arrowJustSeen) ? hp : null;
         double? h = null;
         // Arrow readings are eased in over ~60 ms (they flicker between 2.5-degree steps), a real turn at once.
         double tau = 0.06;
         if (now >= arrowRetry)
         {
             h = headingDetector.Detect(mm, ui, hint);
-            arrowRetry = h == null ? now.AddMilliseconds(500) : default;
+            arrowRetry = h == null && !arrowJustSeen ? now.AddMilliseconds(500) : default;
         }
         headingFromArrow = h != null;
         if (h != null) lastArrowSeen = now;
@@ -913,7 +928,8 @@ public sealed class Engine : IDisposable
         // The corner at 1080p size, once for both the run timer and the Esc button (each made its own).
         using (var small = new Mat())
         {
-            Cv2.Resize(top, small, new Size(), 1 / ui, 1 / ui, InterpolationFlags.Area);
+            if (Dev.ResizeSkip && ui == 1) top.CopyTo(small);
+            else Cv2.Resize(top, small, new Size(), 1 / ui, 1 / ui, InterpolationFlags.Area);
             UpdateInRun(small);
             // The HUD is up if either the Esc button or the run timer shows (two separate elements:
             // particles, a dash or 4K scaling can spoil one for a moment). Only treat it as gone
@@ -984,7 +1000,7 @@ public sealed class Engine : IDisposable
         if (trySanctum)
         {
             var tLocate = perfClock.ElapsedTicks;
-            var pos = minimap.Locate(mm, layout!, ui);
+            var pos = minimap.Locate(mm, layout!, ui, grabbedAt);
             perfLocate.Add(perfClock.ElapsedTicks - tLocate);
             if (logNow) Log.Write($"{minimap.LastInfo} -> {(pos == null ? "rejected" : "ok")} ({layout!.Title})");
             // A wrong layout (e.g. locked from a stale difficulty) never matches. Only frames that
@@ -1090,12 +1106,13 @@ public sealed class Engine : IDisposable
             if (!islandSearch.IsCompleted) return;
             ip = islandSearch.IsCompletedSuccessfully ? islandSearch.Result : null;
             islandSearch = null;
+            if (Dev.StaleSearch && islandSearchRun != gameLog.RunId) { islandTracker.Reset(); Log.Write("island: a search from another run dropped"); return; }
             fromSearch = logNow = true;
         }
         else if (islandTracker.Tracking)
         {
             var tLocate = perfClock.ElapsedTicks;
-            ip = islandTracker.Locate(mm, isl, ui, false);
+            ip = islandTracker.Locate(mm, isl, ui, false, grabbedAt);
             perfLocate.Add(perfClock.ElapsedTicks - tLocate);
         }
         else
@@ -1103,6 +1120,7 @@ public sealed class Engine : IDisposable
             if (clock.ElapsedMilliseconds - lastIslandSearch < 1200) return;
             lastIslandSearch = clock.ElapsedMilliseconds;
             var shot = mm.Clone();
+            islandSearchRun = gameLog.RunId;
             islandSearch = System.Threading.Tasks.Task.Run(() =>
             {
                 try { return islandTracker.Locate(shot, isl, ui, true); }
@@ -1165,6 +1183,8 @@ public sealed class Engine : IDisposable
     /// <summary>The player's movement since the last call (island map px), from the minimap's
     /// scroll between frames (phase correlation of its middle; the player marker and the white view
     /// cone, which turn with the camera, are blanked). Null when it can't tell.</summary>
+    Mat? odoWindow;
+
     internal Point2d? MinimapStep(Mat mm, double ui)
     {
         using var small = new Mat();
@@ -1195,7 +1215,12 @@ public sealed class Engine : IDisposable
         using (prev)
         {
             using var win = new Mat();
-            Cv2.CreateHanningWindow(win, cur.Size(), MatType.CV_32F);
+            if (Dev.HanningCache)
+            {
+                if (odoWindow == null || odoWindow.Size() != cur.Size()) { odoWindow?.Dispose(); odoWindow = new Mat(); Cv2.CreateHanningWindow(odoWindow, cur.Size(), MatType.CV_32F); }
+                odoWindow.CopyTo(win);
+            }
+            else Cv2.CreateHanningWindow(win, cur.Size(), MatType.CV_32F);
             var shift = Cv2.PhaseCorrelate(prev, cur, win, out double response);
             if (response < 0.08 || Math.Abs(shift.X) + Math.Abs(shift.Y) > 24) return null;
             // The map scrolls the opposite way to the player; 1.2 minimap px per island map px.
@@ -1307,6 +1332,7 @@ public sealed class Engine : IDisposable
     readonly PerfStat perfTrack = new(), perfLocate = new(), perfHeading = new(), perfOcr = new();
     bool padWasDown;
     System.Threading.Tasks.Task<Point2d?>? islandSearch;
+    string? islandSearchRun;
 
     // ---- Are we in an Egg Heist run? The run timer (stopwatch icon left of the countdown) is
     // on the HUD only during a run: measured 0.95-1.0 in runs, <0.35 in the open world and hub.
@@ -1330,9 +1356,29 @@ public sealed class Engine : IDisposable
     {
         if (settings.ForcedLayout != 0 || !ocr.Available || gameLog.Where != GameLog.Place.Island || gameLog.RunId == null) return;
         if (challengeArea != gameLog.RunId) { challengeArea = gameLog.RunId; challengeAreaAt = now; nextChallengeRead = now; }
+        if (challengeRead != null)
+        {
+            if (!challengeRead.IsCompleted) return;
+            var found = challengeRead.IsCompletedSuccessfully ? challengeRead.Result : null;
+            challengeRead = null;
+            if (found != null) ChallengeFound(found);
+            return;
+        }
         if ((now - challengeAreaAt).TotalSeconds > 30 || now < nextChallengeRead) return;
         nextChallengeRead = now.AddSeconds(1);
-        if (ChallengeText(ocr, small) is not string text) return;
+        if (Dev.ChallengeAsync)
+        {
+            var copy = small.Clone();
+            challengeRead = System.Threading.Tasks.Task.Run(() => { try { return ChallengeText(ocr, copy); } finally { copy.Dispose(); } });
+            return;
+        }
+        if (ChallengeText(ocr, small) is string text) ChallengeFound(text);
+    }
+
+    System.Threading.Tasks.Task<string?>? challengeRead;
+
+    void ChallengeFound(string text)
+    {
         Log.Write($"challenge on screen (\"{text}\"): not Egg Heist, hiding the maps");
         gameLog.NotEggHeist();
         onIsland = false;
@@ -1647,15 +1693,35 @@ public sealed class Engine : IDisposable
     /// <summary>Normal play (not a menu, the full map or a loading screen): the minimap's Esc
     /// button is on screen. Measured 0.96-1.0 in play, 0.28 on the map screen.</summary>
     /// <param name="small">The HUD corner at 1080p size.</param>
+    Point? escAt;
+
     bool HudVisible(Mat small)
     {
         hudTemplate ??= Cv2.ImRead(System.IO.Path.Combine(db.Root, "icons", "hud_esc.png"));
         if (hudTemplate.Empty()) return true;
         if (small.Width < hudTemplate.Width || small.Height < hudTemplate.Height) return true;
         using var res = new Mat();
-        Cv2.MatchTemplate(small, hudTemplate, res, TemplateMatchModes.CCoeffNormed);
-        Cv2.MinMaxLoc(res, out _, out double max, out _, out Point at);
+        double max = 0;
+        Point at = default;
+        if (Dev.EscNearby && escAt is Point lastEsc)
+        {
+            const int Slack = 8;
+            var near = new Rect(lastEsc.X - Slack, lastEsc.Y - Slack, hudTemplate.Width + 2 * Slack, hudTemplate.Height + 2 * Slack).Intersect(new Rect(0, 0, small.Width, small.Height));
+            if (near.Width > hudTemplate.Width && near.Height > hudTemplate.Height)
+            {
+                using var part0 = new Mat(small, near);
+                Cv2.MatchTemplate(part0, hudTemplate, res, TemplateMatchModes.CCoeffNormed);
+                Cv2.MinMaxLoc(res, out _, out max, out _, out Point inNear);
+                at = new Point(near.X + inNear.X, near.Y + inNear.Y);
+            }
+        }
+        if (max < 0.7)
+        {
+            Cv2.MatchTemplate(small, hudTemplate, res, TemplateMatchModes.CCoeffNormed);
+            Cv2.MinMaxLoc(res, out _, out max, out _, out at);
+        }
         if (max < 0.7) return false;
+        escAt = at;
         // A dimmed Esc button (a fade to black, a loading screen fading in) matches as well as a lit one: not the HUD.
         using var part = new Mat(small, new Rect(at, hudTemplate.Size()));
         using var v = ValueChannel(part);
