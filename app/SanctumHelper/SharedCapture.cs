@@ -260,6 +260,8 @@ public static class SharedCapture
                 Cv2.CvtColor(bgra, bgr, ColorConversionCodes.BGRA2BGR);
                 if (Seq(at + 16) == seq)
                 {
+                    LastPicture = (at, seq);
+                    LastAgeMs = now - I64(at + 24);
                     ScreenCopy = (flags & 2) != 0;
                     CopyMs = U32(at + 52) / 1000.0;
                     if (!announced) { announced = true; Log.Write("using the aLogs app's shared capture"); }
@@ -271,6 +273,11 @@ public static class SharedCapture
             return null;
         }
     }
+
+    /// <summary>Which picture this thread's last copy came from: the same again means nothing's new (Dev.SkipRepeat).</summary>
+    [ThreadStatic] public static (int at, long seq) LastPicture;
+    /// <summary>How old this thread's last copy was when taken, in ms (Dev.PictureAge).</summary>
+    [ThreadStatic] public static long LastAgeMs;
 
     /// <summary>A sequence number (aligned 8-byte read, so atomic on x64), fenced so the pixel reads stay
     /// between the two checks.</summary>

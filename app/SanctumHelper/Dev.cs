@@ -19,7 +19,9 @@ public static class Dev
     public static bool ArtStrips, GcThread, DuplicateTick, LabelCache,
         IslandTile, IslandFastMatch, IslandNear, SanctumNear, FloorHere, WideThrottle, IslandArtThread, ArrivalSlow, TimerNearby,
         RedrawSkip, GlideReset, MisfitFix, OldPanFix, LogLayout, LogIsland, LogCandidates, ExactZoom, MinimapBox, ReleaseOnLock,
-        CornerMargin, MarkerCoast;
+        CornerMargin, MarkerCoast,
+        ChallengeAsync, SkipRepeat, ArrowRetry, StaleSearch, HostedIo, HanningCache, ResizeSkip, EscNearby, WiderDisc,
+        LazyArt, FreeIdle, GrabTime, PictureAge, LogThread;
 
     const string Bench = "Bench tested", Compared = "Compared with the old pictures", Log = "Checked against a real game log", Untested = "Not tested yet";
 
@@ -73,6 +75,35 @@ public static class Dev
         new("release-on-lock", LowRisk, "Memory", "Free other layouts once one is found", "Lets go of the candidates' memory as soon as the layout is locked by any route.",
             "Unknown.", "None found.", Untested, v => ReleaseOnLock = v),
 
+        new("challenge-async", LowRisk, "Smoothness", "Read challenge text off the tracking loop", "The \"Victory Conditions\" check on the island's first 30 s runs on its own thread.",
+            "Removes up to about 30 short pauses each run; size unknown.", "The map hides in a challenge one read later, about a second.", Untested, v => ChallengeAsync = v),
+        new("skip-repeat", LowRisk, "CPU", "Skip pictures already read", "When the capture hands over the same picture again, facing and position aren't worked out again.",
+            "Most at low FPS: maybe 180 ms of CPU a second at 30 FPS; nothing at 60+. An estimate.", "Low: if a changed picture were ever seen as the same, an update would wait for the next one.", Untested, v => SkipRepeat = v),
+        new("arrow-retry", LowRisk, "Accuracy", "Retry a missed arrow read at once", "One missed arrow read no longer stops facing updates for half a second.",
+            "Removes facing freezes of up to 0.5 s.", "Slightly more CPU right after a miss.", Untested, v => ArrowRetry = v),
+        new("stale-search", LowRisk, "Accuracy", "Drop island searches from an old run", "A slow whole-island search that finishes after the run changed is thrown away.",
+            "Avoids a wrong position; how often is unknown.", "None found.", Untested, v => StaleSearch = v),
+        new("hosted-io", LowRisk, "Smoothness", "Write status files off the display thread", "Sanctum Helper's status files for aLogs are written on another thread, so the map's drawing doesn't wait.",
+            "Removes hitches of up to about 80 ms.", "aLogs' status could show a moment later.", Untested, v => HostedIo = v),
+        new("hanning-cache", LowRisk, "CPU", "Island: reuse the movement window", "A calculation window used for each island step is made once.",
+            "Small; under 1 ms a read.", "None found.", Untested, v => HanningCache = v),
+        new("resize-skip", LowRisk, "CPU", "Skip resizing at 1080p", "At 1080p the corner is already the right size, so it isn't copied to resize it.",
+            "Small, and only at 1080p.", "None found.", Untested, v => ResizeSkip = v),
+        new("esc-nearby", LowRisk, "CPU", "Esc button: look where it was", "Checks the Esc button's last spot first, then the whole corner if it isn't there.",
+            "Small; only when the run timer isn't seen.", "Low: a miss falls back to the full search.", Untested, v => EscNearby = v),
+        new("wider-disc", LowRisk, "Accuracy", "Read more of the minimap", "Uses a slightly larger circle of the Sanctum minimap, from the game's files. Use with Exact minimap position.",
+            "More floor to match, so possibly better reads in corridors.", "The game's mask shape couldn't be read, so the edge could add noise and lower match scores.", Untested, v => WiderDisc = v),
+        new("lazy-art", LowRisk, "Memory", "Load the island's extra images only if needed", "The island's gray and transparency images are made only if something asks for them. Takes effect on the next map loaded.",
+            "About 50 MB held, and a lower peak while loading.", "A short load the first time the full island map needs them.", Untested, v => LazyArt = v),
+        new("free-idle", LowRisk, "Memory", "Free map pictures when idle", "The overlay lets go of its map pictures 90 s after the map is hidden.",
+            "About 40-60 MB while idle; an estimate.", "A short stall to reload them when the map next shows.", Untested, v => FreeIdle = v),
+
+        new("grab-time", HighRisk, "Smoothness", "Time movement from when the picture was taken", "Your speed is worked out from when each picture was taken, not when its read finished.",
+            "Steadier speed; size unknown.", "Changes how the marker feels.", Untested, v => GrabTime = v),
+        new("picture-age", HighRisk, "Accuracy", "Use each picture's true age", "The marker leads by how old the picture really is. Up to 200 ms is counted.",
+            "A more accurate marker; size unknown.", "Changes how the marker feels, and it could overshoot.", Untested, v => PictureAge = v),
+        new("log-thread", HighRisk, "Smoothness", "Write Sanctum Helper's log on its own thread", "Log lines are queued, so nothing waits on the file.",
+            "Fewer small pauses; size unknown.", "The last lines could be lost in a crash, right when they're wanted.", Untested, v => LogThread = v),
         new("corner-margin", HighRisk, "CPU", "Smaller Corner map window", "Trims the transparent window around the Corner map.",
             "21% fewer pixels copied each frame at 1080p.", "A long caption could get clipped.", Untested, v => CornerMargin = v),
         new("marker-coast", HighRisk, "Smoothness", "Keep the marker moving after a missed read", "One missed read no longer pulls the marker back.",

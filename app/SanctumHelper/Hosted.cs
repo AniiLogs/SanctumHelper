@@ -263,12 +263,25 @@ public sealed class Hosted
         WriteJson("status.json", status);
     }
 
+    static readonly object WriteGate = new();
+
     static void WriteJson(string name, object value)
+    {
+        if (Dev.HostedIo)
+        {
+            string text = JsonSerializer.Serialize(value, Json);   // (here: what it reads belongs to this thread)
+            System.Threading.Tasks.Task.Run(() => { lock (WriteGate) WriteText(name, text); });
+            return;
+        }
+        lock (WriteGate) WriteText(name, JsonSerializer.Serialize(value, Json));
+    }
+
+    static void WriteText(string name, string text)
     {
         try
         {
             var path = Path.Combine(Dir, name);
-            File.WriteAllText(path + ".tmp", JsonSerializer.Serialize(value, Json));
+            File.WriteAllText(path + ".tmp", text);
             // The app may be reading the file at that moment ("Access to the path is denied"): try again shortly.
             for (int attempt = 1; ; attempt++)
             {

@@ -17,8 +17,9 @@ public sealed record MapPose(Layout Layout, double Scale, double Tx, double Ty, 
 /// background the game draws it on, as grayscale.</summary>
 public sealed class MapArt : IDisposable
 {
-    public Mat Gray { get; }
-    public Mat Alpha { get; }
+    public Mat Gray { get { MakeLazy(); return gray!; } }
+    public Mat Alpha { get { MakeLazy(); return alpha!; } }
+    Mat? gray, alpha;
     /// <summary>Color art on the map's dark background (made on first use).</summary>
     public Mat Bgr { get { if (bgr != null) return bgr; lock (bgrGate) return bgr ??= MakeBgr(); } }
     /// <summary>The color art is ready to use without waiting.</summary>
@@ -28,19 +29,36 @@ public sealed class MapArt : IDisposable
     readonly string path;
     readonly int padW, padH;
 
-    public MapArt(string path, int width = 0, int height = 0)
+    public MapArt(string path, int width = 0, int height = 0, bool lazy = false)
     {
         this.path = path; padW = width; padH = height;
-        if (!Dev.ArtStrips) { (Gray, Alpha) = WholeGrayAlpha(); return; }
+        if (!lazy) MakeLazy();
+    }
+
+    void MakeLazy()
+    {
+        if (gray != null) return;
+        lock (bgrGate)
+        {
+            if (gray != null) return;
+            var (g0, a0) = Dev.ArtStrips ? StripGrayAlpha() : WholeGrayAlpha();
+            alpha = a0;
+            gray = g0;
+        }
+    }
+
+    (Mat gray, Mat alpha) StripGrayAlpha()
+    {
         // Upper-floor images can be cropped at the bottom/right (empty tiles not shipped): pad
         // them to the ground floor's size so all floors share coordinates.
         using var rgba = ReadPadded();
         var ch = rgba.Split();
-        Alpha = ch[3].Clone();
+        var a = ch[3].Clone();
         using var g = new Mat();
         Cv2.CvtColor(rgba, g, ColorConversionCodes.BGRA2GRAY);
-        Gray = OnBackground(g, Alpha);
+        var made = OnBackground(g, a);
         foreach (var c in ch) c.Dispose();
+        return (made, a);
     }
 
     // As before the strips (Dev.ArtStrips off)
@@ -143,14 +161,14 @@ public sealed class MapArt : IDisposable
         return m;
     }
 
-    public void Dispose() { Gray.Dispose(); Alpha.Dispose(); bgr?.Dispose(); }
+    public void Dispose() { gray?.Dispose(); alpha?.Dispose(); bgr?.Dispose(); }
 }
 
 public sealed class MapArtCache(LayoutDb db)
 {
     readonly ConcurrentDictionary<(int, int), MapArt> art = new();
     public MapArt Get(Layout l, int floor = 0) => art.GetOrAdd((l.Number, floor),
-        _ => new MapArt(db.FloorPath(l, floor), l.ImageSize[0], l.ImageSize[1]));
+        _ => new MapArt(db.FloorPath(l, floor), l.ImageSize[0], l.ImageSize[1], Dev.LazyArt && l.IsIsland));
 
     /// <summary>Lets go of the map art of every layout but the ones kept (all of them when none is): a run's
     /// candidates used to stay loaded for good, ~400 MB after a run. Freed 30 s later, so a frame still being
@@ -591,7 +609,7 @@ public sealed class MinimapTracker(MapArtCache arts)
 
     /// <summary>minimapBgr is the square crop centered on the player arrow; uiScale is the
     /// client height / 1080. Returns the player's position in map-art pixels.</summary>
-    public Point2d? Locate(Mat minimapBgr, Layout layout, double uiScale)
+    public Point2d? Locate(Mat minimapBgr, Layout layout, double uiScale, DateTime? pictureAt = null)
     {
         if (minimapBgr.Width < 40) return null;
         bool tracking = last != null;
@@ -602,7 +620,7 @@ public sealed class MinimapTracker(MapArtCache arts)
         Cv2.CvtColor(small, hsv, ColorConversionCodes.BGR2HSV);
         using var disc = new Mat(small.Size(), MatType.CV_8U, Scalar.Black);
         var c = new Point(small.Width / 2, small.Height / 2);
-        int r = (int)(Math.Min(small.Width, small.Height) * 0.44);
+        int r = (int)(Math.Min(small.Width, small.Height) * (Dev.WiderDisc ? 96.0 / 210 : 0.44));   // the game's radius: 96 px of 210 at 1080p
         Cv2.Circle(disc, c, r, Scalar.White, -1);
         Cv2.Circle(disc, c, Math.Max(4, r / 6), Scalar.Black, -1); // the player arrow
         // Explored floor on the minimap: grey, brighter than its walls. How bright depends on
@@ -777,7 +795,7 @@ public sealed class MinimapTracker(MapArtCache arts)
         LastInfo = $"minimap {b.score:0.00} (2nd {b.second:0.00}) at ({b.p.X:0},{b.p.Y:0}) s{b.s:0.00} level {b.fl} floor {floorPx}";
         // Right after a good fix a modest score is fine (the window is small); once lost, the
         // window is wide and look-alike spots appear, so ask for more.
-        var now = DateTime.UtcNow;
+        var now = Dev.GrabTime && pictureAt is DateTime taken ? taken : DateTime.UtcNow;
         double dt = Math.Clamp((now - filterTime).TotalSeconds, 0.005, 0.5);   // (fixes can come 25 ms apart now)
         bool recent = (now - lastOk).TotalSeconds < 1.0;
         var pred = last is Point2d lp0 ? new Point2d(lp0.X + vel.X * dt, lp0.Y + vel.Y * dt) : b.p;
@@ -1324,7 +1342,7 @@ public sealed class IslandTracker(MapArtCache arts)
 
     /// <summary>Returns the player's position in island-art pixels, or null. A whole-island
     /// search is slow (~1 s), so the caller decides when one is allowed.</summary>
-    public Point2d? Locate(Mat minimapBgr, Layout island, double uiScale, bool allowFullSearch)
+    public Point2d? Locate(Mat minimapBgr, Layout island, double uiScale, bool allowFullSearch, DateTime? pictureAt = null)
     {
         bool tracking = Tracking;
         if (!tracking && !allowFullSearch) return null;
@@ -1488,7 +1506,7 @@ public sealed class IslandTracker(MapArtCache arts)
         LastInfo = $"island {b.score:0.00} (2nd {b.second:0.00}) at ({b.p.X:0},{b.p.Y:0}) s{b.s:0.00}";
         if (tracking && (DateTime.UtcNow - lastOk).TotalSeconds >= 1)
             wideNext = DateTime.UtcNow.AddTicks((System.Diagnostics.Stopwatch.GetTimestamp() - lookStart) * 3 * TimeSpan.TicksPerSecond / System.Diagnostics.Stopwatch.Frequency);
-        var now = DateTime.UtcNow;
+        var now = Dev.GrabTime && pictureAt is DateTime taken ? taken : DateTime.UtcNow;
         double dt = Math.Clamp((now - filterTime).TotalSeconds, 0.005, 0.5);
         // Only ever run when the minimap clearly shows the island, so the bar can be lower than
         // it had to be when Sanctum views were also searched.
