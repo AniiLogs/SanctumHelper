@@ -5,15 +5,15 @@ using System.Linq;
 namespace SanctumHelper;
 
 /// <summary>Beta-only test switches, shown on the Dev tab of aLogs' Sanctum Helper page. Each one turns on a proposed change, so it
-/// can be tried alone. All off at every start, on purpose: a build can change what a switch does. The one exception is a switch
-/// the player chose to keep (dev-keep.json): that starts on, through updates, until they unkeep it or it's marked ForcedOff here.
-/// With them all off, Sanctum Helper works as it did in 0.1.36. Before a real release, the ones used become normal behaviour and
-/// the rest, with this file, come out.</summary>
+/// can be tried alone. All off at every start, on purpose: a build can change what a switch does. The one exception is a switch a
+/// tester made persistent (dev-persistent.json): that starts on, through updates, until they undo it or its Revision is raised.
+/// Persistent says nothing about what goes into a release. With them all off, Sanctum Helper works as it did in 0.1.36. Before a
+/// real release, the ones chosen become normal behaviour and the rest, with this file, come out.</summary>
 public static class Dev
 {
     public const string NoRisk = "No known risk", LowRisk = "Low risk", HighRisk = "High risk";
 
-    public sealed record Option(string Id, string Section, string Area, string Title, string What, string Gain, string Risk, string Tested, Action<bool> Set, bool ForcedOff = false);
+    public sealed record Option(string Id, string Section, string Area, string Title, string What, string Gain, string Risk, string Tested, Action<bool> Set, int Revision = 0);
 
     // Read every frame or fix from several threads; a plain field read is all that's needed.
     public static bool ArtStrips, GcThread, DuplicateTick, LabelCache,
@@ -83,7 +83,7 @@ public static class Dev
     public static bool Set(string id, bool on)
     {
         var option = Options.FirstOrDefault(o => o.Id == id);
-        if (option == null || (on && option.ForcedOff)) return false;
+        if (option == null) return false;
         option.Set(on);
         lock (Lit) { if (on) Lit.Add(id); else Lit.Remove(id); }
         SanctumHelper.Log.Write($"dev: {id} {(on ? "on" : "off")}");
@@ -92,45 +92,58 @@ public static class Dev
 
     static readonly HashSet<string> Lit = [];
 
-    // ---- Kept switches: the player's own choice to start one on. Only ever read on a beta (--dev from aLogs), so no real release
-    // can run a switch from an earlier beta's choice.
-    static readonly HashSet<string> Keeping = [];
-    static string KeepFile => System.IO.Path.Combine(Settings.Dir, "dev-keep.json");
+    // ---- Persistent switches: a tester's choice to have one start on, so they needn't remember what they liked. Saved with the
+    // switch's Revision. Changing what a switch does means raising its Revision, the one thing that turns a persistent switch off:
+    // the tester can make it persistent again straight away. Only ever read on a beta (--dev from aLogs).
+    static readonly Dictionary<string, int> Persistent = [];
+    static string PersistFile => System.IO.Path.Combine(Settings.Dir, "dev-persistent.json");
+    static string[] changed = [];
 
-    /// <summary>At start: turns on what the player kept. A switch that's gone, or that the developer has forced off, is forgotten, so
-    /// it takes a new choice to keep it again.</summary>
-    public static void LoadKept()
+    /// <summary>At start: turns on what the tester made persistent. One that has changed since, or no longer exists, is let go.</summary>
+    public static void LoadPersistent()
     {
-        string[] saved;
-        try { saved = System.Text.Json.JsonSerializer.Deserialize<string[]>(System.IO.File.ReadAllText(KeepFile)) ?? []; }
+        Dictionary<string, int> saved;
+        try { saved = System.Text.Json.JsonSerializer.Deserialize<Dictionary<string, int>>(System.IO.File.ReadAllText(PersistFile)) ?? []; }
         catch { return; }   // none yet, or unreadable: all off
-        lock (Keeping) foreach (var id in saved) if (Options.Any(o => o.Id == id && !o.ForcedOff)) Keeping.Add(id);
-        foreach (var id in Kept()) Set(id, true);
-        if (Kept().Length != saved.Length) SaveKept();
+        var gone = new List<string>();
+        foreach (var (id, revision) in saved)
+        {
+            var option = Options.FirstOrDefault(o => o.Id == id);
+            if (option != null && option.Revision == revision) { lock (Persistent) Persistent[id] = revision; Set(id, true); }
+            else { gone.Add(id); SanctumHelper.Log.Write($"dev: {id} no longer persistent: it changed in this build"); }
+        }
+        changed = gone.Where(id => Options.Any(o => o.Id == id)).ToArray();
+        if (gone.Count > 0) SavePersistent();
     }
 
-    /// <summary>Keeping turns it on now as well; unkeeping leaves it as it is until the next start.</summary>
-    public static bool Keep(string id, bool keep)
+    /// <summary>Making one persistent turns it on now as well; undoing that leaves it as it is until the next start.</summary>
+    public static bool SetPersistent(string id, bool persistent)
     {
         var option = Options.FirstOrDefault(o => o.Id == id);
-        if (option == null || (keep && option.ForcedOff)) return false;
-        lock (Keeping) { if (keep) Keeping.Add(id); else Keeping.Remove(id); }
-        if (keep) Set(id, true);
-        SaveKept();
-        SanctumHelper.Log.Write($"dev: {id} {(keep ? "kept" : "no longer kept")}");
+        if (option == null) return false;
+        lock (Persistent) { if (persistent) Persistent[id] = option.Revision; else Persistent.Remove(id); }
+        if (persistent) Set(id, true);
+        changed = changed.Where(x => x != id).ToArray();
+        SavePersistent();
+        SanctumHelper.Log.Write($"dev: {id} {(persistent ? "persistent" : "not persistent")}");
         return true;
     }
 
-    public static string[] Kept() { lock (Keeping) return Keeping.OrderBy(x => x).ToArray(); }
+    public static string[] PersistentOnes() { lock (Persistent) return Persistent.Keys.OrderBy(x => x).ToArray(); }
 
-    static void SaveKept()
+    /// <summary>Those turned off at this start because they changed in this build, for the tab to say so.</summary>
+    public static string[] ChangedOnes() => changed;
+
+    static void SavePersistent()
     {
         try
         {
-            System.IO.File.WriteAllText(KeepFile + ".tmp", System.Text.Json.JsonSerializer.Serialize(Kept()));
-            System.IO.File.Move(KeepFile + ".tmp", KeepFile, true);
+            string text;
+            lock (Persistent) text = System.Text.Json.JsonSerializer.Serialize(Persistent);
+            System.IO.File.WriteAllText(PersistFile + ".tmp", text);
+            System.IO.File.Move(PersistFile + ".tmp", PersistFile, true);
         }
-        catch (Exception e) { SanctumHelper.Log.Write("dev: saving kept switches: " + e.Message); }
+        catch (Exception e) { SanctumHelper.Log.Write("dev: saving persistent switches: " + e.Message); }
     }
 
     /// <summary>The switches on now.</summary>

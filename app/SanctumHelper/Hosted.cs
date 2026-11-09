@@ -118,8 +118,8 @@ public sealed class Hosted
                 Dev.Set(cmd.GetProperty("id").GetString() ?? "", cmd.GetProperty("on").GetBoolean());
                 WriteStatus();
                 break;
-            case "dev-keep":
-                Dev.Keep(cmd.GetProperty("id").GetString() ?? "", cmd.GetProperty("keep").GetBoolean());
+            case "dev-persistent":
+                Dev.SetPersistent(cmd.GetProperty("id").GetString() ?? "", cmd.GetProperty("persistent").GetBoolean());
                 WriteStatus();
                 break;
             // the app turns Sanctum Helper off: close the normal way (settings and logs saved), not killed
@@ -218,7 +218,7 @@ public sealed class Hosted
         {
             version = v?.ToString(3),
             gameDataVersion = db.GameDataVersion,
-            dev = Dev.Options.Select(o => new { id = o.Id, section = o.Section, area = o.Area, title = o.Title, what = o.What, gain = o.Gain, risk = o.Risk, tested = o.Tested, forcedOff = o.ForcedOff }),
+            dev = Dev.Options.Select(o => new { id = o.Id, section = o.Section, area = o.Area, title = o.Title, what = o.What, gain = o.Gain, risk = o.Risk, tested = o.Tested }),
             difficulties = db.Difficulties.Select(d => new { value = d, name = Lang.Difficulty(d) }),
             styles = OverlayView.MiniMapStyles.Select(m => new { value = m.Value, name = Lang.T(m.Name), description = Lang.T(m.Description) }),
             languages = Lang.Languages.Select(l => new { code = l.Code, name = l.Name }),
@@ -244,7 +244,8 @@ public sealed class Hosted
             time = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
             pid = Environment.ProcessId,
             devOn = Dev.On(),
-            devKept = Dev.Kept(),
+            devPersistent = Dev.PersistentOnes(),
+            devChanged = Dev.ChangedOnes(),
             gameFound = engine.GameFound,
             inRun = engine.GameFound && engine.InRun,
             difficulty = engine.EffectiveDifficulty is string d ? Lang.Difficulty(d) : null,
