@@ -1034,7 +1034,9 @@ public sealed class Engine : IDisposable
         if (!settings.IslandMap || db.Island is not Layout isl || !hudVisible || !islandLike) { odoPrev?.Dispose(); odoPrev = null; return; }
         // How far the player moved since the last frame, from how far the minimap scrolled. It
         // carries the position across open ground where nothing on the minimap can be matched.
-        var step = MinimapStep(mm, ui);
+        using var shrunk = Dev.IslandShrinkOnce ? new Mat() : null;
+        if (shrunk != null) Cv2.Resize(mm, shrunk, new Size(), 1 / ui, 1 / ui, InterpolationFlags.Area);   // (both below want this)
+        var step = MinimapStep(mm, ui, shrunk);
         Point2d? dead = onIsland && islandPlayer is Point2d cur0 && (now - islandTime).TotalSeconds < 3
             ? new Point2d(cur0.X + (step?.X ?? 0), cur0.Y + (step?.Y ?? 0)) : null;
         // The island's art takes a second or so to load: on its own thread, not this one, which would stop following meanwhile.
@@ -1045,7 +1047,7 @@ public sealed class Engine : IDisposable
         }
         // A Sanctum portal icon in view pins the position exactly, even on open ground where the
         // minimap shows nothing to match (big grass fields): it overrides a drifting image match.
-        if (islandSearch == null && IslandLandmark(mm, ui, isl) is Point2d lm)
+        if (islandSearch == null && IslandLandmark(mm, ui, isl, shrunk) is Point2d lm)
         {
             // Whenever the portal is in view it decides (the image match drifts on open ground);
             // the tracker restarts from there so it follows on once the portal leaves the view.
@@ -1185,10 +1187,11 @@ public sealed class Engine : IDisposable
     /// cone, which turn with the camera, are blanked). Null when it can't tell.</summary>
     Mat? odoWindow;
 
-    internal Point2d? MinimapStep(Mat mm, double ui)
+    internal Point2d? MinimapStep(Mat mm, double ui, Mat? shrunk = null)
     {
-        using var small = new Mat();
-        Cv2.Resize(mm, small, new Size(), 1 / ui, 1 / ui, InterpolationFlags.Area);
+        using var own = shrunk == null ? new Mat() : null;
+        var small = shrunk ?? own!;
+        if (shrunk == null) Cv2.Resize(mm, small, new Size(), 1 / ui, 1 / ui, InterpolationFlags.Area);
         int side = 128;
         var c = new Point(small.Width / 2, small.Height / 2);
         var roi = new Rect(c.X - side / 2, c.Y - side / 2, side, side).Intersect(new Rect(0, 0, small.Width, small.Height));
@@ -1283,13 +1286,14 @@ public sealed class Engine : IDisposable
     /// <summary>The player's island position from a Sanctum exit-portal icon on the minimap: its
     /// offset from the center (1.2 minimap px per map px) back from that portal's place. Of the
     /// five portals, the one that fits the last known position (they are 800+ px apart).</summary>
-    Point2d? IslandLandmark(Mat mm, double ui, Layout isl)
+    Point2d? IslandLandmark(Mat mm, double ui, Layout isl, Mat? shrunk = null)
     {
         Point2d? near = islandPlayer is Point2d ip0 && (DateTime.UtcNow - islandTime).TotalSeconds < 30 ? ip0 : null;
         portalIcon ??= Cv2.ImRead(System.IO.Path.Combine(db.Root, "icons", "mm_portal_blue.png"));
         if (portalIcon.Empty()) return null;
-        using var small = new Mat();
-        Cv2.Resize(mm, small, new Size(), 1 / ui, 1 / ui, InterpolationFlags.Area);
+        using var own = shrunk == null ? new Mat() : null;
+        var small = shrunk ?? own!;
+        if (shrunk == null) Cv2.Resize(mm, small, new Size(), 1 / ui, 1 / ui, InterpolationFlags.Area);
         if (small.Width <= portalIcon.Width || small.Height <= portalIcon.Height) return null;
         using var res = new Mat();
         Cv2.MatchTemplate(small, portalIcon, res, TemplateMatchModes.CCoeffNormed);
@@ -1863,7 +1867,9 @@ public sealed class Engine : IDisposable
         if (guess != null && doors.LastMapOpen && !reused)
         {
             bool sure = src == "doors";
-            var refined = refiner.Refine(frame!, guess, sure ? 0.06 : 0.15, sure ? 40 : 120);
+            // (The doors place the map exactly, so the arrow on it says where the player is: which floors are possible there.)
+            Point2d? arrowAt = sure && Dev.FloorRooms && arrow is Point2d ar ? new Point2d((ar.X - guess.Tx) / guess.Scale, (ar.Y - guess.Ty) / guess.Scale) : null;
+            var refined = refiner.Refine(frame!, guess, sure ? 0.06 : 0.15, sure ? 40 : 120, arrowAt);
             double need = sure ? 0.5 : 0.45;
             if ((refined == null || refiner.LastScore < need) && !sure && clock.ElapsedMilliseconds - lastWideSearch > 500)
             {

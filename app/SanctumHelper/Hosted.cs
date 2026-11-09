@@ -94,10 +94,30 @@ public sealed class Hosted
 
     // ---- Commands from aLogs
 
+    bool scanning;
+
     void RunCommands()
     {
+        if (Dev.HostedScan)
+        {
+            // Looking in the folder is off the display thread; only a command found comes back here to run.
+            if (scanning) return;
+            scanning = true;
+            System.Threading.ThreadPool.QueueUserWorkItem(_ =>
+            {
+                string[] found = [];
+                try { found = Directory.GetFiles(Dir, "cmd-*.json").OrderBy(f => f).ToArray(); } catch { }
+                app.Dispatcher.BeginInvoke(() => { scanning = false; if (found.Length > 0) RunFiles(found); });
+            });
+            return;
+        }
         string[] files;
         try { files = Directory.GetFiles(Dir, "cmd-*.json").OrderBy(f => f).ToArray(); } catch { return; }
+        RunFiles(files);
+    }
+
+    void RunFiles(string[] files)
+    {
         foreach (var file in files)
         {
             JsonElement cmd;

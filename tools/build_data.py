@@ -21,6 +21,10 @@ Facts this relies on (checked against the game, 2026-10-29, data patch 3846247):
   entity, with positions local to the room prefab (rotated by the room's yaw).
 - scene_data[<id>] maps world (x, z) to the 2048x2048 map image with two
   reference points (PointA/B world <-> MapA/B image, image y is negative).
+- The game shows the upper-floor map (layer 1_2_0, as its image is named) only inside the areas of
+  Scene.10000.scene_area_data whose enterEvents give changeMapLayerData [1, 2, 0]: room sandboxIds
+  -> sandbox areaIds, areaAABB (min x, min z, max x, max z) local to the room, rotated by its yaw.
+  The upper-floor images have floor only inside them, to within 10 px (checked on all 32 layouts, 3846247).
 """
 import argparse, glob, json, math, os, re, sys, zipfile
 from PIL import Image
@@ -113,6 +117,33 @@ def rotate(local, yaw):
     a = math.radians(yaw)
     x, z = local
     return x * math.cos(a) + z * math.sin(a), -x * math.sin(a) + z * math.cos(a)
+
+
+def upper_floor_areas(r, room):
+    """The areaAABBs that switch the map to the upper floor, among a room's sandboxes."""
+    sandboxes, areas = r["Scene.10000.scene_sandbox_data"], r["Scene.10000.scene_area_data"]
+    out = []
+    for sid in room.get("sandboxIds") or []:
+        if sid not in sandboxes.keys():
+            continue
+        for aid in py(sandboxes[sid]).get("areaIds") or []:
+            if aid not in areas.keys():
+                continue
+            a = py(areas[aid])
+            for logic in rows(a.get("logics")) or []:
+                if any(e[0] == "changeMapLayerData" and any(e[1]) for e in rows(logic.get("enterEvents")) or []):
+                    out.append(a["areaAABB"])
+                    break
+    return out
+
+
+def upper_rect(aabb, x, z, yaw, to_img):
+    """Where one of those areas is on the map image: [x0, y0, x1, y1], image px, around a room at world (x, z)."""
+    x0, z0, x1, z1 = aabb
+    pts = [rotate(p, yaw) for p in ((x0, z0), (x0, z1), (x1, z0), (x1, z1))]
+    img = [to_img(x + dx, z + dz) for dx, dz in pts]
+    xs, ys = [p[0] for p in img], [p[1] for p in img]
+    return [min(xs), min(ys), max(xs), max(ys)]
 
 
 ISLAND = 3005
@@ -249,9 +280,10 @@ def main():
         def to_img(x, z):
             return round(ox + x * sx, 1), round(oy - z * sz, 1)
 
-        rooms, markers = [], []
+        rooms, markers, upper_rects = [], [], []
         for rm in rows(r[name]):
             x, _, z = rm["position"]
+            upper_rects += [upper_rect(aabb, x, z, rm.get("yaw", 0), to_img) for aabb in upper_floor_areas(r, rm)]
             kind = {3: "orange", 4: "blue", 2: "corridor", 6: "challenge"}.get(rm["roomType"], "room")
             if "_Key" in rm["resId"]:
                 kind = "key"
@@ -309,7 +341,7 @@ def main():
             "worldToImage": {"ox": ox, "oy": oy, "sx": sx, "sz": sz},
             "doorVector": {"angle": round(math.degrees(math.atan2(dx, dz)) % 360, 1), "distance": round(math.hypot(dx, dz), 1)},
             "miniMapImageScale": sd.get("miniMapImageScale"), "mapImageScale": sd.get("mapImageScale"),
-            "rooms": rooms, "markers": markers,
+            "rooms": rooms, "markers": markers, "upperRects": upper_rects,
         })
 
     layouts.append(build_island(r, T, a.maps))

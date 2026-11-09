@@ -69,6 +69,18 @@ public sealed class Layout
     public DoorVector DoorVector { get; set; } = new();
     public List<Room> Rooms { get; set; } = [];
     public List<Marker> Markers { get; set; } = [];
+    /// <summary>The areas where the game shows the upper floor, in map-art px (x0, y0, x1, y1): scene_area_data's changeMapLayerData, by room.</summary>
+    public List<double[]> UpperRects { get; set; } = [];
+
+    /// <summary>Could a player at this map-art spot be on the upper floor? Always yes when the data has no rooms for it. The margin
+    /// (art px, about 10 m) covers how far a position can be off, or moved since it was read.</summary>
+    public bool MayBeUpstairs(double x, double y, double margin = 60)
+    {
+        if (UpperRects.Count == 0) return true;
+        foreach (var r in UpperRects)
+            if (x >= r[0] - margin && x <= r[2] + margin && y >= r[1] - margin && y <= r[3] + margin) return true;
+        return false;
+    }
 
     public Room Orange => Rooms.First(r => r.Kind == "orange");
     public Room Blue => Rooms.First(r => r.Kind == "blue");

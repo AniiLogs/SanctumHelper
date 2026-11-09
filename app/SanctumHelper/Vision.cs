@@ -17,9 +17,12 @@ public sealed record MapPose(Layout Layout, double Scale, double Tx, double Ty, 
 /// background the game draws it on, as grayscale.</summary>
 public sealed class MapArt : IDisposable
 {
-    public Mat Gray { get { MakeLazy(); return gray!; } }
-    public Mat Alpha { get { MakeLazy(); return alpha!; } }
+    public Mat Gray { get { Mat? g; while ((g = gray) == null) MakeLazy(); return g; } }
+    public Mat Alpha { get { Mat? a; while ((a = alpha) == null) MakeLazy(); return a; } }
     Mat? gray, alpha;
+    /// <summary>With Dev.CompactMasks, instead of Gray and Alpha held whole (those are then made only if asked for): one byte a
+    /// pixel, bit 0 = walkable floor (gray over 120 and alpha over 128), bit 1 = alpha over 128. All that matching ever tests.</summary>
+    public Mat? Mask { get; private set; }
     /// <summary>Color art on the map's dark background (made on first use).</summary>
     public Mat Bgr { get { if (bgr != null) return bgr; lock (bgrGate) return bgr ??= MakeBgr(); } }
     /// <summary>The color art is ready to use without waiting.</summary>
@@ -29,10 +32,53 @@ public sealed class MapArt : IDisposable
     readonly string path;
     readonly int padW, padH;
 
-    public MapArt(string path, int width = 0, int height = 0, bool lazy = false)
+    public MapArt(string path, int width = 0, int height = 0, bool lazy = false, bool compact = false)
     {
         this.path = path; padW = width; padH = height;
-        if (!lazy) MakeLazy();
+        if (compact) MakeMask();
+        else if (!lazy) MakeLazy();
+    }
+
+    void MakeMask()
+    {
+        var (g0, a0) = Dev.ArtStrips ? StripGrayAlpha() : WholeGrayAlpha();
+        using (g0)
+        using (a0)
+        using (var seen = new Mat())
+        using (var bright = new Mat())
+        {
+            Cv2.Threshold(a0, seen, 128, 255, ThresholdTypes.Binary);
+            Cv2.Threshold(g0, bright, 120, 255, ThresholdTypes.Binary);
+            Cv2.BitwiseAnd(bright, seen, bright);
+            var m = new Mat(a0.Size(), MatType.CV_8U, Scalar.All(0));
+            m.SetTo(Scalar.All(2), seen);
+            m.SetTo(Scalar.All(3), bright);
+            Mask = m;
+        }
+    }
+
+    /// <summary>1 where the art has walkable floor, 0 elsewhere (8-bit), written into dst.</summary>
+    public void FloorBinary(Mat dst)
+    {
+        if (Mask is Mat m) { Cv2.BitwiseAnd(m, Scalar.All(1), dst); return; }
+        Cv2.Threshold(Gray, dst, 120, 1.0, ThresholdTypes.Binary);
+        using var seen = new Mat();
+        Cv2.Threshold(Alpha, seen, 128, 1.0, ThresholdTypes.Binary);
+        Cv2.Multiply(dst, seen, dst);
+    }
+
+    /// <summary>Compact art only: lets go of the Gray and Alpha made for someone who asked (ORB features, once a layout).</summary>
+    public void DropGrayAlpha()
+    {
+        if (Mask == null) return;
+        lock (bgrGate)
+        {
+            var had = new List<Mat>();
+            if (gray != null) had.Add(gray);
+            if (alpha != null) had.Add(alpha);
+            gray = alpha = null;
+            Later.Dispose(had);
+        }
     }
 
     void MakeLazy()
@@ -161,14 +207,14 @@ public sealed class MapArt : IDisposable
         return m;
     }
 
-    public void Dispose() { gray?.Dispose(); alpha?.Dispose(); bgr?.Dispose(); }
+    public void Dispose() { gray?.Dispose(); alpha?.Dispose(); bgr?.Dispose(); Mask?.Dispose(); }
 }
 
 public sealed class MapArtCache(LayoutDb db)
 {
     readonly ConcurrentDictionary<(int, int), MapArt> art = new();
     public MapArt Get(Layout l, int floor = 0) => art.GetOrAdd((l.Number, floor),
-        _ => new MapArt(db.FloorPath(l, floor), l.ImageSize[0], l.ImageSize[1], Dev.LazyArt && l.IsIsland));
+        _ => new MapArt(db.FloorPath(l, floor), l.ImageSize[0], l.ImageSize[1], Dev.LazyArt && l.IsIsland, Dev.CompactMasks && !l.IsIsland));
 
     /// <summary>Lets go of the map art of every layout but the ones kept (all of them when none is): a run's
     /// candidates used to stay loaded for good, ~400 MB after a run. Freed 30 s later, so a frame still being
@@ -231,6 +277,7 @@ public sealed class ArtFeatureCache(MapArtCache arts)
         var all = new Mat();
         Cv2.VConcat(descs.Where(d => !d.Empty()).ToArray(), all);
         foreach (var d in descs) d.Dispose();
+        arts.Get(l).DropGrayAlpha();
         return new Features { Desc = all, FullPts = pts.ToArray() };
     });
 
@@ -596,10 +643,7 @@ public sealed class MinimapTracker(MapArtCache arts)
     {
         var a = arts.Get(l, floorIdx);
         using var floor = new Mat();
-        Cv2.Threshold(a.Gray, floor, 120, 1.0, ThresholdTypes.Binary);
-        using var alpha = new Mat();
-        Cv2.Threshold(a.Alpha, alpha, 128, 1.0, ThresholdTypes.Binary);
-        Cv2.Multiply(floor, alpha, floor);
+        a.FloorBinary(floor);
         using var f = new Mat();
         floor.ConvertTo(f, MatType.CV_32F);
         var small = new Mat();
@@ -711,6 +755,8 @@ public sealed class MinimapTracker(MapArtCache arts)
         foreach (var s in scales)
         {
             if (fl != Floor && tracking && !othersDue && best is { } cur && cur.fl == Floor && cur.score >= 0.6) { allFloors = false; continue; }
+            // Only some rooms have an upper floor, and the game shows it only inside them (the upper art has no floor more than 10 px from them).
+            if (fl != 0 && Dev.FloorRooms && settledAlready && !layout.MayBeUpstairs(last!.Value.X, last.Value.Y)) continue;
             var map = ArtFloor(layout, fl, s, Work);
             double kk = s * Work; // art px -> work px
             var roi = new Rect(0, 0, map.Width, map.Height);
@@ -1036,9 +1082,10 @@ public sealed class DoorLocator(MapArtCache arts, Mat? header, Mat? orangeIcon =
                 M.Set(0, 0, s); M.Set(0, 1, 0.0); M.Set(0, 2, O.X - s * oi[0]);
                 M.Set(1, 0, 0.0); M.Set(1, 1, s); M.Set(1, 2, O.Y - s * oi[1]);
                 using var warped = new Mat();
-                Cv2.WarpAffine(arts.Get(l).Alpha, warped, M, small.Size(), InterpolationFlags.Nearest);
+                var drawn = arts.Get(l);
+                Cv2.WarpAffine(drawn.Mask ?? drawn.Alpha, warped, M, small.Size(), InterpolationFlags.Nearest);
                 using var on = new Mat();
-                Cv2.Threshold(warped, on, 128, 255, ThresholdTypes.Binary);
+                Cv2.Threshold(warped, on, drawn.Mask != null ? 1 : 128, 255, ThresholdTypes.Binary);   // (bit 1 of the mask: alpha over 128)
                 using var both = new Mat();
                 Cv2.BitwiseAnd(on, lit, both);
                 cover = (double)Cv2.CountNonZero(both) / litCount;
@@ -1103,7 +1150,12 @@ public sealed class FloorRefiner(MapArtCache arts)
     public double LastScore { get; private set; }
 
     /// <summary>Lets go of the full-size floors of every layout but the ones kept (all of them when none is).</summary>
-    public void Trim(Func<int, bool> keep) => Later.Dispose(Later.Take(artFloor, k => keep(k.Item1)));
+    public void Trim(Func<int, bool> keep)
+    {
+        Later.Dispose(Later.Take(artFloor, k => keep(k.Item1)));
+        // The last frame's prepared template, whichever layout it was for.
+        if (Dev.RefinerTrim && prep != null) { Later.Dispose(new List<Prepared> { prep }); prep = null; prepFor = null; }
+    }
     /// <summary>Floor the full map is showing: 0 ground, 1+ upstairs.</summary>
     public int Floor { get; private set; }
 
@@ -1111,10 +1163,7 @@ public sealed class FloorRefiner(MapArtCache arts)
     {
         var a = arts.Get(l, level);
         using var floor = new Mat();
-        Cv2.Threshold(a.Gray, floor, 120, 1.0, ThresholdTypes.Binary);
-        using var alpha = new Mat();
-        Cv2.Threshold(a.Alpha, alpha, 128, 1.0, ThresholdTypes.Binary);
-        Cv2.Multiply(floor, alpha, floor);
+        a.FloorBinary(floor);
         var f = new Mat();
         floor.ConvertTo(f, MatType.CV_32F);
         return f;
@@ -1146,13 +1195,17 @@ public sealed class FloorRefiner(MapArtCache arts)
 
     /// <summary>Best pose near the guess, or null. spread = relative zoom range searched,
     /// window = position range searched in 1080p pixels.</summary>
-    public MapPose? Refine(Mat frameBgr, MapPose guess, double spread, int window)
+    /// <param name="player">Where the arrow on the map puts the player (map-art px), if known: Dev.FloorRooms tries the upper floor
+    /// only when that's in or near a room that has one.</param>
+    public MapPose? Refine(Mat frameBgr, MapPose guess, double spread, int window, Point2d? player = null)
     {
         // Ground floor first; upstairs the game draws the upper-floor map instead.
         MapPose? bestPose = null; double bestScore = -1; string bestInfo = ""; int bestFloor = 0;
         int floors = LayoutDb.FloorCount(guess.Layout);
+        bool groundOnly = Dev.FloorRooms && player is Point2d at && !guess.Layout.MayBeUpstairs(at.X, at.Y);
         foreach (var fl in Enumerable.Range(0, floors).OrderBy(x => x == Floor ? 0 : 1))
         {
+            if (groundOnly && fl != 0) continue;
             var p = RefineOn(frameBgr, guess, spread, window, fl);
             if (LastScore > bestScore) { bestScore = LastScore; bestPose = p; bestInfo = LastInfo; bestFloor = fl; }
             if (bestScore >= 0.6) break; // good enough on the current floor: skip the others
@@ -1672,6 +1725,7 @@ public sealed class HeadingDetector
     });
 
     [ThreadStatic] static byte[]? conePx;
+    [ThreadStatic] static double[]? coneSmooth, coneArc;
 
     /// <summary>Per-slice mean near-white level of the ring: the HSV of the ring's box only, read into a buffer
     /// kept per thread (it was the whole minimap, copied into a new 130 KB array, a large-object allocation, ~60
@@ -1686,8 +1740,9 @@ public sealed class HeadingDetector
         if (conePx == null || conePx.Length < len) conePx = new byte[len];
         var px = conePx;
         System.Runtime.InteropServices.Marshal.Copy(hsv.Data, px, 0, len);   // (a new Mat is continuous)
-        var sum = new double[bins];
-        var n = new int[bins];
+        bool reuse = Dev.ConeArcs;
+        var sum = reuse ? ConeBuf(bins == 360 ? 0 : 1, bins, true) : new double[bins];
+        var n = reuse ? ConeCounts(bins) : new int[bins];
         for (int i = 0; i < lut.Length; i++)
         {
             int b = lut[i];
@@ -1697,16 +1752,75 @@ public sealed class HeadingDetector
             if (sat < 50 && val > 205) sum[b] += Math.Min(1, (val - 205) / 35.0);
             n[b]++;
         }
-        var prof = new double[bins];
+        var prof = reuse ? ConeBuf(bins == 360 ? 2 : 3, bins, false) : new double[bins];
         for (int i = 0; i < bins; i++) prof[i] = n[i] > 0 ? sum[i] / n[i] : 0;
         return prof;
+    }
+
+    // The cone's arrays, kept per thread with Dev.ConeArcs (about 15 KB new ~60 times a second).
+    [ThreadStatic] static double[][]? coneBufs;
+    [ThreadStatic] static int[]? coneCounts360, coneCounts90;
+    static double[] ConeBuf(int slot, int len, bool clear)
+    {
+        coneBufs ??= new double[8][];
+        var b = coneBufs[slot];
+        if (b == null || b.Length != len) return coneBufs[slot] = new double[len];
+        if (clear) Array.Clear(b);
+        return b;
+    }
+    static int[] ConeCounts(int bins)
+    {
+        var c = bins == 360 ? coneCounts360 : coneCounts90;
+        if (c != null && c.Length == bins) { Array.Clear(c); return c; }
+        c = new int[bins];
+        if (bins == 360) coneCounts360 = c; else coneCounts90 = c;
+        return c;
+    }
+
+    /// <summary>The best arc of win slices: its first slice, and its sum in bestSum. Ties keep the first.</summary>
+    static int BestArc(double[] prof, int win, out double bestSum)
+    {
+        int bins = prof.Length, best = 0;
+        bestSum = -1;
+        if (!Dev.ConeArcs)
+        {
+            for (int i = 0; i < bins; i++)
+            {
+                double t = 0;
+                for (int j = 0; j < win; j++) t += prof[(i + j) % bins];
+                if (t > bestSum) { bestSum = t; best = i; }
+            }
+            return best;
+        }
+        // Each arc's sum from the last one's. That builds up rounding, which could pick another of arcs that are really equal, so
+        // only those within a hair of the top are summed afresh, as above: the same arc, and the same sum, as above.
+        var sums = ConeBuf(bins == 360 ? 4 : 5, bins, false);
+        double s = 0, top = double.MinValue;
+        bool any = false;
+        for (int j = 0; j < win; j++) s += prof[j];
+        for (int i = 0; i < bins; i++)
+        {
+            if (i > 0) s += prof[(i + win - 1) % bins] - prof[i - 1];
+            sums[i] = s;
+            if (s > top) top = s;
+            any |= prof[i] != 0;
+        }
+        if (!any) { bestSum = 0; return 0; }      // nothing lit anywhere: every arc ties at 0
+        for (int i = 0; i < bins; i++)
+        {
+            if (sums[i] < top - 1e-9) continue;
+            double t = 0;
+            for (int j = 0; j < win; j++) t += prof[(i + j) % bins];
+            if (t > bestSum) { bestSum = t; best = i; }
+        }
+        return best;
     }
 
     /// <summary>The median of the profile outside the window of win slices from best.</summary>
     static double Outside(double[] prof, int best, int win)
     {
         int bins = prof.Length;
-        var rest = new double[bins - win];
+        var rest = Dev.ConeArcs ? ConeBuf(bins == 360 ? 6 : 7, bins - win, false) : new double[bins - win];
         int k = 0;
         for (int i = 0; i < bins; i++) if (((i - best) % bins + bins) % bins >= win) rest[k++] = prof[i];
         Array.Sort(rest);
@@ -1729,7 +1843,7 @@ public sealed class HeadingDetector
         Cv2.Resize(minimapBgr, small, new Size(), k, k, InterpolationFlags.Area);
         const int Bins = 360;
         var raw = ConeProfile(small, Bins);
-        var prof = new double[Bins];                 // lightly smoothed (5 deg), so single pixels don't make edges
+        var prof = Dev.ConeArcs ? (coneSmooth ??= new double[Bins]) : new double[Bins];   // lightly smoothed (5 deg), so single pixels don't make edges
         for (int i = 0; i < Bins; i++)
         {
             double t = 0;
@@ -1738,20 +1852,14 @@ public sealed class HeadingDetector
         }
         // where the cone is: the best 72-degree arc (as the centroid reader), and how much it stands out
         const int Win = 72;
-        int best = 0; double bestSum = -1;
-        for (int i = 0; i < Bins; i++)
-        {
-            double t = 0;
-            for (int j = 0; j < Win; j++) t += prof[(i + j) % Bins];
-            if (t > bestSum) { bestSum = t; best = i; }
-        }
+        int best = BestArc(prof, Win, out double bestSum);
         double inside = bestSum / Win;
         double outside = Outside(prof, best, Win);
         confidence = Math.Clamp(inside - outside, 0, 1);
         if (inside < 0.25 || inside < outside * 2 + 0.1) return null;
         // the edges: from the arc's middle, outwards until the profile falls below half-way between the cone's
         // plateau and the floor around it (with sub-degree interpolation)
-        var arc = new double[Win];
+        var arc = Dev.ConeArcs ? (coneArc ??= new double[Win]) : new double[Win];
         for (int j = 0; j < Win; j++) arc[j] = prof[(best + j) % Bins];
         Array.Sort(arc);
         double plateau = arc[(int)(arc.Length * 0.75)];
@@ -1767,7 +1875,9 @@ public sealed class HeadingDetector
             }
             return null;
         }
-        if (Edge(-1) is double left && Edge(1) is double right && right - left is >= 35 and <= 140)
+        // The game's cone runs -58 to +56 degrees from north at its faintest: edges wider than that (and the 2 either way it was
+        // measured to) are something else that's bright, so with Dev.ConeCheck those go to the other reader too.
+        if (Edge(-1) is double left && Edge(1) is double right && right - left is >= 35 and <= 140 && !(Dev.ConeCheck && right - left > 118))
             return (((left + right) / 2 + 0.5) % 360 + 360) % 360;      // + 0.5: bin i covers i..i+1 degrees
         return FromViewConeCentroid(minimapBgr, uiScale, out confidence);
     }
@@ -1785,13 +1895,7 @@ public sealed class HeadingDetector
         var prof = ConeProfile(small, Bins);
         // The best ~72 deg arc, then its brightness-weighted center.
         const int Win = 18;
-        int best = 0; double bestSum = -1;
-        for (int i = 0; i < Bins; i++)
-        {
-            double t = 0;
-            for (int j = 0; j < Win; j++) t += prof[(i + j) % Bins];
-            if (t > bestSum) { bestSum = t; best = i; }
-        }
+        int best = BestArc(prof, Win, out double bestSum);
         double inside = bestSum / Win;
         double outside = Outside(prof, best, Win);
         confidence = Math.Clamp(inside - outside, 0, 1);
@@ -1845,11 +1949,13 @@ public sealed class HeadingDetector
         using var crop = new Mat();
         Cv2.Resize(crop0, crop, new Size(48, 48), 0, 0, InterpolationFlags.Area);
         // The crop goes to the frequency domain once for all the rotations tried (11 with a hint, 34 without).
-        using var image = new MatchImage(crop);
+        using var image = Dev.FasterArrow ? null : new MatchImage(crop);
+        var plain = Dev.FasterArrow ? PlainPixels(crop) : null;
         double Score(int i)
         {
             var (_, bgr, _, match) = bank[i];
             if (crop.Width < bgr.Width || crop.Height < bgr.Height) return -1;
+            if (image == null) return Direct(i, plain!, crop.Width, crop.Height, narrow: hint != null);
             using var res = new Mat();
             match.Match(image, res);
             Cv2.PatchNaNs(res, -1);
@@ -1866,9 +1972,16 @@ public sealed class HeadingDetector
             for (int d = -9; d <= 9; d += 3) { int i = ((c0 + d) % n + n) % n; double sc = Score(i); if (sc > bestScore) { bestScore = sc; best = i; } }
             int mid = best;
             foreach (int d in new[] { -2, -1, 1, 2 }) { int i = ((mid + d) % n + n) % n; double sc = Score(i); if (sc > bestScore) { bestScore = sc; best = i; } }
+            if (image == null && bestScore >= 0.65)
+            {
+                // The winner over all its positions, which also says where the arrow is for the next read.
+                double whole = Direct(best, plain!, crop.Width, crop.Height, narrow: false);
+                bestScore = Math.Max(bestScore, whole);
+            }
             if (bestScore >= 0.65) { LastScore = bestScore; return bank[best].angle; }
             bestScore = -1; best = 0;
         }
+        wideRead = true;
         // Coarse (every 15 deg), then fine around the best (2.5 deg steps).
         for (int i = 0; i < n; i += step) { double sc = Score(i); if (sc > bestScore) { bestScore = sc; best = i; } }
         int coarse = best;
@@ -1879,7 +1992,100 @@ public sealed class HeadingDetector
             double sc = Score(i);
             if (sc > bestScore) { bestScore = sc; best = i; }
         }
+        wideRead = false;
+        if (image == null && bestScore >= 0.65) Direct(best, plain!, crop.Width, crop.Height, narrow: false);
         LastScore = bestScore;
         return bestScore >= 0.65 ? bank[best].angle : null;
+    }
+
+    // ---- Dev.FasterArrow: the same score as MaskedTemplate.Match, but summed directly over the arrow's pixels at the few positions
+    // that matter. The result is only 9x9 positions, too few for the frequency domain to pay: it took 5 inverse transforms per rotation.
+    sealed class PlainArrow
+    {
+        public int Width, Height, Count;
+        public int[] Xs = [], Ys = [];
+        public float[] Weights = [];      // per masked pixel and channel: the template minus its masked mean
+        public double Norm;
+    }
+    PlainArrow?[]? plainBank;
+    int arrowX = -1, arrowY = -1;         // where the last read's winner peaked
+    bool wideRead;
+
+    PlainArrow Plain(int i)
+    {
+        plainBank ??= new PlainArrow?[bank.Count];
+        if (plainBank[i] is PlainArrow made) return made;
+        var (_, bgr, mask, _) = bank[i];
+        using var f = MaskedTemplate.ToFloat(bgr);
+        var xs = new List<int>(); var ys = new List<int>();
+        for (int y = 0; y < mask.Rows; y++)
+            for (int x = 0; x < mask.Cols; x++)
+                if (mask.At<byte>(y, x) != 0) { xs.Add(x); ys.Add(y); }
+        int n = xs.Count, channels = bgr.Channels();
+        var w = new float[n * channels];
+        double norm = 0;
+        for (int c = 0; c < channels; c++)
+        {
+            double mean = 0;
+            for (int k = 0; k < n; k++) mean += f.At<Vec3f>(ys[k], xs[k])[c];
+            mean /= Math.Max(1, n);
+            for (int k = 0; k < n; k++)
+            {
+                float t = (float)(f.At<Vec3f>(ys[k], xs[k])[c] - mean);
+                w[k * channels + c] = t;
+                norm += t * t;
+            }
+        }
+        return plainBank[i] = new PlainArrow { Width = bgr.Width, Height = bgr.Height, Count = n, Xs = xs.ToArray(), Ys = ys.ToArray(), Weights = w, Norm = norm };
+    }
+
+    byte[]? plainBytes;
+    float[]? plainFloats;
+
+    /// <summary>The crop as floats 0-1, three a pixel.</summary>
+    float[] PlainPixels(Mat crop)
+    {
+        int len = crop.Width * crop.Height * 3;
+        var bytes = plainBytes ??= new byte[len];
+        var f = plainFloats ??= new float[len];
+        System.Runtime.InteropServices.Marshal.Copy(crop.Data, bytes, 0, len);   // (a new Mat is continuous; always the same size)
+        for (int i = 0; i < len; i++) f[i] = bytes[i] / 255f;
+        return f;
+    }
+
+    /// <summary>The best score of a rotation: around where the arrow last was if narrow (two pixels each way), else everywhere.</summary>
+    double Direct(int i, float[] img, int width, int height, bool narrow)
+    {
+        var t = Plain(i);
+        int rw = width - t.Width + 1, rh = height - t.Height + 1;
+        int x0 = 0, x1 = rw - 1, y0 = 0, y1 = rh - 1;
+        if (narrow && !wideRead && arrowX >= 0 && arrowX < rw && arrowY < rh)
+        {
+            x0 = Math.Max(0, arrowX - 2); x1 = Math.Min(rw - 1, arrowX + 2);
+            y0 = Math.Max(0, arrowY - 2); y1 = Math.Min(rh - 1, arrowY + 2);
+        }
+        double best = -1;
+        int bx = -1, by = -1, n = t.Count;
+        var xs = t.Xs; var ys = t.Ys; var w = t.Weights;
+        for (int oy = y0; oy <= y1; oy++)
+            for (int ox = x0; ox <= x1; ox++)
+            {
+                double num = 0, s0 = 0, s1 = 0, s2 = 0, sq = 0;
+                for (int k = 0; k < n; k++)
+                {
+                    int p = ((oy + ys[k]) * width + ox + xs[k]) * 3;
+                    float a = img[p], b = img[p + 1], c = img[p + 2];
+                    num += a * w[3 * k] + b * w[3 * k + 1] + c * w[3 * k + 2];
+                    s0 += a; s1 += b; s2 += c;
+                    sq += a * a + b * b + c * c;
+                }
+                // As MaskedTemplate.Match: num / sqrt((sq - sum^2 / n) * |templ|^2); flat windows are no match, nor is rounding over 1.
+                double below = (sq - (s0 * s0 + s1 * s1 + s2 * s2) / n) * t.Norm;
+                double v = below > 0 ? num / Math.Sqrt(below) : -1;
+                if (v > 1) v = 0;
+                if (v > best) { best = v; bx = ox; by = oy; }
+            }
+        if (!narrow) { arrowX = bx; arrowY = by; }
+        return best;
     }
 }

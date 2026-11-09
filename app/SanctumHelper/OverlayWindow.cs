@@ -129,7 +129,7 @@ public sealed class OverlayWindow : Window
         view.Frame = f;
         bool egg = HeadingFeed.Egg;
         long nowMs = Environment.TickCount64;
-        bool sameLook = Dev.RedrawSkip && before != null && f is { Mini: true, Visible: true, Player: not null } && before.Player != null && egg == lastEgg && nowMs - lastRedraw < 250
+        bool sameLook = (Dev.RedrawSkip || (Dev.RetainedMap && view.RetainedLive)) && before != null && f is { Mini: true, Visible: true, Player: not null } && before.Player != null && egg == lastEgg && nowMs - lastRedraw < 250
             && before with { Player = f.Player, PlayerFresh = f.PlayerFresh, Heading = f.Heading, Velocity = f.Velocity, Stamp = f.Stamp, Camera = f.Camera } == f;
         lastEgg = egg;
         if (sameLook) return;
@@ -306,7 +306,16 @@ public sealed class OverlayView : FrameworkElement
     public OverlayFrame? Frame
     {
         get => frame;
-        set { frame = value; Animating = !Preview && value is { Mini: true, Visible: true, Player: not null }; }
+        set
+        {
+            frame = value;
+            Animating = !Preview && value is { Mini: true, Visible: true, Player: not null };
+            if (Dev.DecodeThread && !Preview && !Placing && value is { Visible: true, Layout: Layout l } && l.Number != readied)
+            {
+                readied = l.Number;
+                for (int fl = 0; fl < LayoutDb.FloorCount(l); fl++) Art(l, fl);
+            }
+        }
     }
     /// <summary>Drawn inside the settings window: no DPI undo, no "not lined up" hint.</summary>
     public bool Preview { get; set; }
@@ -371,7 +380,7 @@ public sealed class OverlayView : FrameworkElement
         freeTimer.Tick += (_, _) =>
         {
             freeTimer?.Stop();
-            if (!animating && Frame is not { Visible: true }) { images.Clear(); outlines.Clear(); }
+            if (!animating && Frame is not { Visible: true }) { images.Clear(); outlines.Clear(); retainedMap = null; retainedFor = null; }
         };
         freeTimer.Start();
     }
@@ -414,7 +423,7 @@ public sealed class OverlayView : FrameworkElement
         double ta = 1 - Math.Exp(-dt / 0.015);
         bool turned = Turn(ref shownHeading, live ? liveHeading : fr.Heading, ta);
         turned |= Turn(ref shownCamera, live ? liveCamera : fr.Camera, ta);
-        if (turned) InvalidateVisual();
+        if (turned && !TurnRetained()) InvalidateVisual();
         // Keep moving along the current velocity between fixes (up to 0.25 s ahead), so the map
         // glides at display rate instead of stepping at the tracking rate.
         var target = fix;
@@ -426,7 +435,7 @@ public sealed class OverlayView : FrameworkElement
         if (shown is not OpenCvSharp.Point2d cur || Math.Abs(cur.X - target.X) + Math.Abs(cur.Y - target.Y) > 300)
         {
             shown = target; // first fix or a confirmed teleport: snap
-            InvalidateVisual();
+            if (!MoveRetained()) InvalidateVisual();
             return;
         }
         if (Math.Abs(cur.X - target.X) + Math.Abs(cur.Y - target.Y) < 0.3) return;
@@ -434,7 +443,7 @@ public sealed class OverlayView : FrameworkElement
         // ~40 a second now (were ~20), so less is needed; 70 ms trailed a walking player by 70 ms.
         double a = 1 - Math.Exp(-dt / 0.035);
         shown = new OpenCvSharp.Point2d(cur.X + (target.X - cur.X) * a, cur.Y + (target.Y - cur.Y) * a);
-        InvalidateVisual();
+        if (!MoveRetained()) InvalidateVisual();
     }
 
     /// <summary>Where a floor image goes: the ground floor spans the layout's full image size
@@ -449,19 +458,74 @@ public sealed class OverlayView : FrameworkElement
         floor = Math.Clamp(floor, 0, LayoutDb.FloorCount(l) - 1);
         if (!images.TryGetValue((l.Number, floor), out var bmp))
         {
-            var bi = new BitmapImage();
-            bi.BeginInit();
-            bi.UriSource = new Uri(db.FloorPath(l, floor));
-            // The island art is 6144 px wide: half resolution is plenty for the on-screen map and
-            // keeps redrawing it at display rate cheap.
-            if (l.IsIsland) bi.DecodePixelWidth = l.ImageSize[0] / 2;
-            bi.CacheOption = BitmapCacheOption.OnLoad;
-            bi.EndInit();
-            bi.Freeze();
+            var bi = DecodeArt(l, floor);
             Forget(images, l);
             images[(l.Number, floor)] = bmp = bi;
         }
         return bmp;
+    }
+
+    BitmapImage DecodeArt(Layout l, int floor)
+    {
+        var bi = new BitmapImage();
+        bi.BeginInit();
+        bi.UriSource = new Uri(db.FloorPath(l, floor));
+        // The island art is 6144 px wide: half resolution is plenty for the on-screen map and
+        // keeps redrawing it at display rate cheap.
+        if (l.IsIsland) bi.DecodePixelWidth = l.ImageSize[0] / 2;
+        bi.CacheOption = BitmapCacheOption.OnLoad;
+        bi.EndInit();
+        bi.Freeze();
+        return bi;
+    }
+
+    // ---- Dev.DecodeThread: a map's pictures are decoded on another thread when its layout comes up. Until one is ready, only that
+    // picture is left out of what's drawn, for a frame or two. Previews and placing still wait for it: they're one picture.
+    readonly HashSet<(bool, int, int)> decoding = new();
+    /// <summary>A picture of the map is still on its way.</summary>
+    public bool Decoding => decoding.Count > 0;
+    int readied = int.MinValue;
+
+    BitmapSource? Art(Layout l, int floor)
+    {
+        if (!Dev.DecodeThread || Preview || Placing) return Image(l, floor);
+        floor = Math.Clamp(floor, 0, LayoutDb.FloorCount(l) - 1);
+        if (images.TryGetValue((l.Number, floor), out var bmp)) return bmp;
+        InBackground((false, l.Number, floor), () => DecodeArt(l, floor), made =>
+        {
+            if (!ShowingNow(l)) return;
+            Forget(images, l);
+            images[(l.Number, floor)] = made;
+        });
+        return null;
+    }
+
+    BitmapSource? OutlineArt(Layout l, int level)
+    {
+        if (!Dev.DecodeThread || Preview || Placing) return Outline(l, level);
+        level = Math.Clamp(level, 0, LayoutDb.FloorCount(l) - 1);
+        if (outlines.TryGetValue((l.Number, level), out var bmp)) return bmp;
+        InBackground((true, l.Number, level), () => MakeOutline(l, level), made =>
+        {
+            if (!ShowingNow(l)) return;
+            Forget(outlines, l);
+            outlines[(l.Number, level)] = made;
+        });
+        return null;
+    }
+
+    bool ShowingNow(Layout l) => l.IsIsland || frame?.Layout?.Number == l.Number || frame?.Pose?.Layout.Number == l.Number;
+
+    void InBackground((bool, int, int) what, Func<BitmapSource> make, Action<BitmapSource> done)
+    {
+        if (!decoding.Add(what)) return;
+        System.Threading.ThreadPool.QueueUserWorkItem(_ =>
+        {
+            BitmapSource? made = null;
+            try { made = make(); }
+            catch (Exception e) { Log.Write("map art: " + e.Message); }   // (stays marked: it isn't tried again and again)
+            if (made != null) Dispatcher.BeginInvoke(() => { decoding.Remove(what); done(made); InvalidateVisual(); });
+        });
     }
 
     /// <summary>Wall outlines of a layout (Diablo-style see-through map): light edges with a faint
@@ -470,6 +534,13 @@ public sealed class OverlayView : FrameworkElement
     {
         level = Math.Clamp(level, 0, LayoutDb.FloorCount(l) - 1);
         if (outlines.TryGetValue((l.Number, level), out var bmp)) return bmp;
+        bmp = MakeOutline(l, level);
+        Forget(outlines, l);
+        return outlines[(l.Number, level)] = bmp;
+    }
+
+    BitmapSource MakeOutline(Layout l, int level)
+    {
         using var rgba = OpenCvSharp.Cv2.ImRead(db.FloorPath(l, level), OpenCvSharp.ImreadModes.Unchanged);
         var ch = rgba.Split();
         using var floor = new OpenCvSharp.Mat();
@@ -489,10 +560,9 @@ public sealed class OverlayView : FrameworkElement
         foreach (var c in ch) c.Dispose();
         var bytes = new byte[outM.Total() * 4];
         System.Runtime.InteropServices.Marshal.Copy(outM.Data, bytes, 0, bytes.Length);
-        bmp = BitmapSource.Create(outM.Width, outM.Height, 96, 96, PixelFormats.Pbgra32, null, bytes, outM.Width * 4);
+        var bmp = BitmapSource.Create(outM.Width, outM.Height, 96, 96, PixelFormats.Pbgra32, null, bytes, outM.Width * 4);
         bmp.Freeze();
-        Forget(outlines, l);
-        return outlines[(l.Number, level)] = bmp;
+        return bmp;
     }
 
     /// <summary>Drops the decoded images of other layouts (each map is ~16-22 MB decoded; they used to pile up run
@@ -508,6 +578,8 @@ public sealed class OverlayView : FrameworkElement
     protected override void OnRender(DrawingContext dc)
     {
         long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+        Renders++;
+        RetainedLive = false;
         try { RenderAll(dc); }
         finally { Perf.Add(System.Diagnostics.Stopwatch.GetTimestamp() - t0); }
     }
@@ -566,10 +638,12 @@ public sealed class OverlayView : FrameworkElement
 
         if ((settings.ShowMapImage && !L.IsIsland) || !aligned)
         {
-            var bmp = Image(L, f.Floor);
-            dc.PushOpacity(aligned ? settings.MapOpacity : 0.95);
-            dc.DrawImage(bmp, ImageRect(L, f.Floor, bmp, tx, ty, scale));
-            dc.Pop();
+            if (Art(L, f.Floor) is BitmapSource bmp)
+            {
+                dc.PushOpacity(aligned ? settings.MapOpacity : 0.95);
+                dc.DrawImage(bmp, ImageRect(L, f.Floor, bmp, tx, ty, scale));
+                dc.Pop();
+            }
         }
 
         DrawMarkers(dc, L, P, ms, settings.ShowLabels);
@@ -736,18 +810,120 @@ public sealed class OverlayView : FrameworkElement
         {
             case "Overlay":
                 // The character stands a little below the screen center in the game's camera.
-                RenderSeeThrough(dc, f, L, me, new Point(f.Client.Width / 2.0, f.Client.Height * 0.56), scale, ms, ui);
+                RenderSeeThrough(dc, f, L, me, new Point(f.Client.Width / 2.0, f.Client.Height * 0.56), scale, ms, ui, Retain);
                 break;
             case "Disc": RenderDisc(dc, f, L, me, panel, scale, ms, ui); break;
             case "Radar": RenderRadar(dc, f, L, me, panel, scale, ms, ui); break;
             case "Compass": RenderCompass(dc, f, L, me, panel, ui); break;
-            default: RenderPanel(dc, f, L, me, panel, scale, ms, ui); break;
+            default: RenderPanel(dc, f, L, me, panel, scale, ms, ui, Retain); break;
         }
         if (Placing) PlacementChrome(dc, panel, style, ui);
     }
 
+    // ---- Dev.RetainedMap: the map (art and marks) is drawn once into a frozen group under a translation, and the arrow and cone under
+    // rotations, all left in place by OnRender. A frame where only those change sets their values and doesn't call it: nothing is
+    // recorded again. Anything else (settings, floor, the frame's other values) comes through OnRender as before.
+    readonly TranslateTransform retainedMove = new();
+    readonly RotateTransform retainedArrow = new(), retainedCone = new();
+    DrawingGroup? retainedMap;
+    object? retainedFor;
+    Point retainedCenter;
+    double retainedScale;
+    enum Turning { No, Yes, Never }   // not drawn yet (no reading), turning, or drawn so that it doesn't matter
+    Turning arrowTurns, coneTurns;
+    /// <summary>The last OnRender drew the retained way, so moving and turning need no other.</summary>
+    public bool RetainedLive { get; private set; }
+    /// <summary>How many times OnRender has run.</summary>
+    public long Renders { get; private set; }
+    /// <summary>Draws the retained way in a preview too (for comparing the pictures).</summary>
+    public bool RetainInPreview { get; set; }
+    bool Retain => Dev.RetainedMap && !Placing && (!Preview || RetainInPreview);
+
+    static readonly string[] LayerKinds = ["doors", "key", "challenge", "pile", "pot", "mound", "simple", "exquisite", "luxurious", "legendary", "nest"];
+
+    /// <summary>The map at (0,0), ready to move: made again only if something in it changed.</summary>
+    DrawingGroup RetainedMapGroup(Layout L, int floor, BitmapSource? art, bool outline, double scale, double ms, bool labels)
+    {
+        var key = (L.Number, floor, art, scale, ms, labels, string.Join(",", LayerKinds.Where(settings.Layer)), Lang.Code, Dev.BossRooms, Dev.LabelCache);
+        if (retainedMap != null && key.Equals(retainedFor)) return retainedMap;
+        var group = new DrawingGroup();
+        using (var dc = group.Open())
+        {
+            if (art != null)
+            {
+                if (outline) dc.DrawImage(art, new Rect(0, 0, art.PixelWidth * scale, art.PixelHeight * scale));
+                else
+                {
+                    dc.PushOpacity(0.9);
+                    dc.DrawImage(art, ImageRect(L, floor, art, 0, 0, scale));
+                    dc.Pop();
+                }
+            }
+            DrawMarkers(dc, L, img => new Point(img[0] * scale, img[1] * scale), ms, labels);
+        }
+        group.Freeze();
+        retainedFor = key;
+        return retainedMap = group;
+    }
+
+    /// <summary>The cone and arrow around c, under their rotations, and everything Animate needs to move them.</summary>
+    void RetainedYou(DrawingContext dc, OverlayFrame f, OpenCvSharp.Point2d me, Point c, double scale, double cone, double arrowSize)
+    {
+        retainedCenter = c;
+        retainedScale = scale;
+        retainedMove.X = c.X - me.X * scale;
+        retainedMove.Y = c.Y - me.Y * scale;
+        coneTurns = !settings.ShowViewCone ? Turning.Never : f.Camera != null ? Turning.Yes : Turning.No;
+        if (f.Camera is double cam && settings.ShowViewCone)
+        {
+            retainedCone.Angle = cam; retainedCone.CenterX = c.X; retainedCone.CenterY = c.Y;
+            dc.PushTransform(retainedCone);
+            ViewCone(dc, c, 0, cone);
+            dc.Pop();
+        }
+        if (HeadingFeed.Egg && IconImage("egg_marker") != null) arrowTurns = Turning.Never;
+        else arrowTurns = IconImage("player_arrow") == null ? Turning.Never : f.Heading != null ? Turning.Yes : Turning.No;
+        if (arrowTurns == Turning.Yes && IconImage("player_arrow") is BitmapSource arrow)
+        {
+            retainedArrow.Angle = f.Heading!.Value; retainedArrow.CenterX = c.X; retainedArrow.CenterY = c.Y;
+            dc.PushTransform(retainedArrow);
+            dc.DrawImage(arrow, new Rect(c.X - arrowSize / 2, c.Y - arrowSize / 2, arrowSize, arrowSize));
+            dc.Pop();
+        }
+        else Player(dc, c, f.Heading, arrowSize);
+        RetainedLive = true;
+    }
+
+    /// <summary>The shown position is on the map without a redraw (false: one is needed).</summary>
+    bool MoveRetained()
+    {
+        if (!Dev.RetainedMap || !RetainedLive || shown is not OpenCvSharp.Point2d at) return false;
+        retainedMove.X = retainedCenter.X - at.X * retainedScale;
+        retainedMove.Y = retainedCenter.Y - at.Y * retainedScale;
+        return true;
+    }
+
+    /// <summary>The shown facing and camera are on the map without a redraw (false: one is needed, because something appeared or went).</summary>
+    bool TurnRetained()
+    {
+        if (!Dev.RetainedMap || !RetainedLive) return false;
+        double? h = shownHeading ?? Frame?.Heading, cam = shownCamera ?? Frame?.Camera;
+        if ((arrowTurns == Turning.No && h != null) || (arrowTurns == Turning.Yes && h == null)) return false;
+        if ((coneTurns == Turning.No && cam != null) || (coneTurns == Turning.Yes && cam == null)) return false;
+        if (arrowTurns == Turning.Yes) retainedArrow.Angle = h!.Value;
+        if (coneTurns == Turning.Yes) retainedCone.Angle = cam!.Value;
+        return true;
+    }
+
+    /// <summary>Developer check (--styles): as Animate does, shows a position and facing without any redraw.</summary>
+    public bool MoveForTest(OpenCvSharp.Point2d at, double? heading, double? camera)
+    {
+        shown = at; shownHeading = heading; shownCamera = camera;
+        return MoveRetained() & TurnRetained();
+    }
+
     /// <summary>Corner map (PoE-style) and the big map: a framed, north-up square.</summary>
-    void RenderPanel(DrawingContext dc, OverlayFrame f, Layout L, OpenCvSharp.Point2d me, Rect panel, double scale, double ms, double ui)
+    void RenderPanel(DrawingContext dc, OverlayFrame f, Layout L, OpenCvSharp.Point2d me, Rect panel, double scale, double ms, double ui, bool retain = false)
     {
         var c = new Point(panel.X + panel.Width / 2, panel.Y + panel.Height / 2);
         double tx = c.X - me.X * scale, ty = c.Y - me.Y * scale;
@@ -756,14 +932,28 @@ public sealed class OverlayView : FrameworkElement
         dc.PushOpacity(MiniOpacity);
         dc.DrawGeometry(PanelFill, null, clip);
         dc.PushClip(clip);
-        var bmp = Image(L, f.Floor);
-        dc.PushOpacity(0.9);
-        dc.DrawImage(bmp, ImageRect(L, f.Floor, bmp, tx, ty, scale));
-        dc.Pop();
+        var bmp = Art(L, f.Floor);
+        if (retain)
+        {
+            var map = RetainedMapGroup(L, f.Floor, bmp, false, scale, ms, f.Big && settings.ShowLabels);
+            dc.PushTransform(retainedMove);
+            dc.DrawDrawing(map);
+            dc.Pop();
+            RetainedYou(dc, f, me, c, scale, (f.Big ? 130 : 70) * ui, (f.Big ? 44 : 34) * ui);
+        }
+        else
+        {
+        if (bmp != null)
+        {
+            dc.PushOpacity(0.9);
+            dc.DrawImage(bmp, ImageRect(L, f.Floor, bmp, tx, ty, scale));
+            dc.Pop();
+        }
         DrawMarkers(dc, L, P, ms, labels: f.Big && settings.ShowLabels);
         // You: the game's arrow, turned the way you face, under the camera's view cone.
         ViewCone(dc, c, f.Camera, (f.Big ? 130 : 70) * ui);
         Player(dc, c, f.Heading, (f.Big ? 44 : 34) * ui);
+        }
         dc.Pop(); // clip
         dc.DrawRoundedRectangle(null, new Pen(new SolidColorBrush(Color.FromArgb(160, 255, 255, 255)), 1.5 * ui), panel, 18 * ui, 18 * ui);
         Label(dc, "N", new Point(panel.X + panel.Width / 2, panel.Y + 4 * ui), System.Windows.Media.Colors.White, 13 * ui, above: false);
@@ -773,11 +963,11 @@ public sealed class OverlayView : FrameworkElement
 
     /// <summary>Diablo-style: faint outlines that fade out towards the screen edges, so the game
     /// stays the focus and nothing ends in a hard edge.</summary>
-    void RenderSeeThrough(DrawingContext dc, OverlayFrame f, Layout L, OpenCvSharp.Point2d me, Point c, double scale, double ms, double ui)
+    void RenderSeeThrough(DrawingContext dc, OverlayFrame f, Layout L, OpenCvSharp.Point2d me, Point c, double scale, double ms, double ui, bool retain = false)
     {
         double tx = c.X - me.X * scale, ty = c.Y - me.Y * scale;
         Point P(double[] img) => new(img[0] * scale + tx, img[1] * scale + ty);
-        var outline = Outline(L, f.Floor);
+        var outline = OutlineArt(L, f.Floor);
         var fade = new RadialGradientBrush
         {
             MappingMode = BrushMappingMode.Absolute, Center = c, GradientOrigin = c,
@@ -797,7 +987,19 @@ public sealed class OverlayView : FrameworkElement
         dc.PushOpacityMask(top);
         dc.PushOpacityMask(fade);
         dc.PushOpacity(settings.OverlayOpacity);
-        dc.DrawImage(outline, new Rect(tx, ty, outline.PixelWidth * scale, outline.PixelHeight * scale));
+        if (retain)
+        {
+            var map = RetainedMapGroup(L, f.Floor, outline, true, scale, ms, false);
+            dc.PushTransform(retainedMove);
+            dc.DrawDrawing(map);
+            dc.Pop();
+            dc.Pop();
+            dc.Pop();
+            dc.Pop();
+            RetainedYou(dc, f, me, c, scale, 150 * ui, 46 * ui);
+            return;
+        }
+        if (outline != null) dc.DrawImage(outline, new Rect(tx, ty, outline.PixelWidth * scale, outline.PixelHeight * scale));
         DrawMarkers(dc, L, P, ms, labels: false);
         dc.Pop();
         dc.Pop();
@@ -821,10 +1023,12 @@ public sealed class OverlayView : FrameworkElement
         dc.PushClip(clip);
         dc.PushTransform(new RotateTransform(turn, c.X, c.Y));
         spin = -turn; // icons and labels stay upright
-        var bmp = Image(L, f.Floor);
-        dc.PushOpacity(0.9);
-        dc.DrawImage(bmp, ImageRect(L, f.Floor, bmp, tx, ty, scale));
-        dc.Pop();
+        if (Art(L, f.Floor) is BitmapSource bmp)
+        {
+            dc.PushOpacity(0.9);
+            dc.DrawImage(bmp, ImageRect(L, f.Floor, bmp, tx, ty, scale));
+            dc.Pop();
+        }
         DrawMarkers(dc, L, P, ms, labels: false);
         spin = 0;
         dc.Pop(); // rotation
@@ -861,14 +1065,15 @@ public sealed class OverlayView : FrameworkElement
         dc.PushClip(clip);
         if (L.IsIsland)
         {
-            var bmp = Image(L, f.Floor);
-            dc.PushOpacity(0.3);
-            dc.DrawImage(bmp, ImageRect(L, f.Floor, bmp, tx, ty, scale));
-            dc.Pop();
+            if (Art(L, f.Floor) is BitmapSource bmp)
+            {
+                dc.PushOpacity(0.3);
+                dc.DrawImage(bmp, ImageRect(L, f.Floor, bmp, tx, ty, scale));
+                dc.Pop();
+            }
         }
-        else
+        else if (OutlineArt(L, f.Floor) is BitmapSource outline)
         {
-            var outline = Outline(L, f.Floor);
             dc.PushOpacity(0.55);
             dc.DrawImage(outline, new Rect(tx, ty, outline.PixelWidth * scale, outline.PixelHeight * scale));
             dc.Pop();
@@ -1015,7 +1220,8 @@ public sealed class OverlayView : FrameworkElement
             foreach (var r in L.KeyRooms)
                 yield return ("key", r.Door?.Img ?? r.Img, KeyColor(r), 1.2);
         if (settings.Layer("challenge"))
-            foreach (var r in L.Rooms.Where(r => r.Kind == "challenge")) yield return ("challenge", r.Img, Color.FromRgb(0xE9, 0xEA, 0xF2), 1);
+            foreach (var r in L.Rooms.Where(r => r.Kind == "challenge" || (Dev.BossRooms && r.Kind == "boss")))
+                yield return (r.Kind == "boss" ? "chest_gold" : "challenge", r.Img, r.Kind == "boss" ? BossColor : Color.FromRgb(0xE9, 0xEA, 0xF2), 1);
         if (settings.Layer("nest"))
             foreach (var m in L.Markers.Where(m => m.Kind == "nest")) yield return ("nest", m.Img, Colors["nest"], 1);
     }
@@ -1094,6 +1300,7 @@ public sealed class OverlayView : FrameworkElement
         return r;
     }
 
+    static readonly Color BossColor = Color.FromRgb(0xFF, 0x7A, 0x6B);
     static readonly Brush PanelFill = Freeze(new SolidColorBrush(Color.FromArgb(215, 14, 16, 26)));
     static readonly Brush RadarFill = Freeze(new SolidColorBrush(Color.FromArgb(200, 6, 18, 28)));
     static readonly Pen RadarRing = Freeze(new Pen(new SolidColorBrush(Color.FromArgb(70, 120, 210, 255)), 1));
@@ -1141,6 +1348,20 @@ public sealed class OverlayView : FrameworkElement
             }
         }
 
+        // A boss room (Level_Room_30_BOSS: 30 m square, like a key room's by its prefab name), framed as key rooms are.
+        if (Dev.BossRooms && settings.Layer("challenge"))
+        {
+            foreach (var r in L.Rooms.Where(r => r.Kind == "boss"))
+            {
+                const double H = 15;
+                var w = L.WorldToImage;
+                Point a = P([w.Ox + (r.World[0] - H) * w.Sx, w.Oy - (r.World[1] + H) * w.Sz]), b = P([w.Ox + (r.World[0] + H) * w.Sx, w.Oy - (r.World[1] - H) * w.Sz]);
+                var pen = new Pen(new SolidColorBrush(Color.FromArgb(220, BossColor.R, BossColor.G, BossColor.B)), Math.Max(2, 2.5 * ms)) { DashStyle = DashStyles.Dash };
+                dc.DrawRoundedRectangle(new SolidColorBrush(Color.FromArgb(28, BossColor.R, BossColor.G, BossColor.B)), pen, new Rect(a, b), 6, 6);
+                if (labels) Label(dc, Lang.T("Boss room"), new Point((a.X + b.X) / 2, Math.Min(a.Y, b.Y) - 2 * ms), BossColor, 13 * ms, above: true);
+            }
+        }
+
         // Loot, small first so the important ones draw on top. Chest tiers use the game's
         // treasure-chest art (white < blue < purple < gold), small stuff its generic loot mark.
         string[] order = ["pile", "pot", "mound", "simple", "exquisite", "luxurious", "legendary", "nest"];
@@ -1157,8 +1378,8 @@ public sealed class OverlayView : FrameworkElement
                         if (labels) Label(dc, Lang.Term("EggNest", "Nest"), new Point(p.X, p.Y + icon * 0.55), Colors["nest"], 12 * ms, above: false);
                         break;
                     case "legendary":
-                        // Always there in a key room; elsewhere only a chance.
-                        bool sure = keyRooms.Contains(m.Room);
+                        // Always there in a key room (and in a boss room, whose one spawner of it has no alternative); elsewhere only a chance.
+                        bool sure = keyRooms.Contains(m.Room) || (Dev.BossRooms && L.Rooms.Any(r => r.Id == m.Room && r.Kind == "boss"));
                         Icon(dc, "chest_gold", p, sure ? icon : icon * 0.72, sure ? 1 : 0.8);
                         if (sure && labels) Label(dc, Lang.T("Legendary"), new Point(p.X, p.Y + icon * 0.5), Colors["legendary"], 11 * ms, above: false);
                         break;
