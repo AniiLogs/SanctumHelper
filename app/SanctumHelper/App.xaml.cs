@@ -115,6 +115,9 @@ public partial class App : Application
         }
         if (e.Args.Length >= 6 && e.Args[0] == "--styles")
         {
+            // (SH_DEV: which Dev switches to draw with, for comparing the pictures: a comma list, or all.)
+            foreach (var id in (Environment.GetEnvironmentVariable("SH_DEV") ?? "").Split(',', StringSplitOptions.RemoveEmptyEntries))
+                foreach (var o in Dev.Options.Where(o => id == "all" || o.Id == id)) Dev.Set(o.Id, true);
             try { Analyzer.Styles(e.Args, LayoutDb.Load(Path.Combine(AppContext.BaseDirectory, "Assets"))); }
             catch (Exception ex) { Directory.CreateDirectory(e.Args[1]); File.WriteAllText(Path.Combine(e.Args[1], "error.txt"), ex.ToString()); }
             Shutdown();

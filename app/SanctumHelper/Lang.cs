@@ -91,17 +91,26 @@ public static class Lang
     /// <summary>The game's language setting as it is right now (it can be changed while playing).</summary>
     public static string? ReadGameLanguage() => DetectGameLanguage();
 
+    static string? languageValue;
+
     static string? DetectGameLanguage()
     {
         try
         {
             using var key = Registry.CurrentUser.OpenSubKey(@"Software\Aniimo\Aniimo");
             if (key == null) return null;
-            var name = key.GetValueNames().FirstOrDefault(n => n.Contains("_language_h", StringComparison.OrdinalIgnoreCase)
-                && !n.Contains("Audio", StringComparison.OrdinalIgnoreCase));
-            if (name == null) return null;
+            // (Unity keeps all of the game's preferences here: listing them each time is the cost, and this value's name doesn't change.)
+            object? held = Dev.LangCache && languageValue != null ? key.GetValue(languageValue) : null;
+            if (held == null)
+            {
+                var name = key.GetValueNames().FirstOrDefault(n => n.Contains("_language_h", StringComparison.OrdinalIgnoreCase)
+                    && !n.Contains("Audio", StringComparison.OrdinalIgnoreCase));
+                if (name == null) return null;
+                languageValue = name;
+                held = key.GetValue(name);
+            }
             // Unity keeps ints as DWORDs, but this one is saved as text ("2" plus a NUL).
-            int i = key.GetValue(name) switch
+            int i = held switch
             {
                 int v => v,
                 long v => (int)v,

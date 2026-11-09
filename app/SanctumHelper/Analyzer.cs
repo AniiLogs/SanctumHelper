@@ -177,7 +177,8 @@ public static class Analyzer
         double? heading = a.Length > 6 ? double.Parse(a[6], System.Globalization.CultureInfo.InvariantCulture) : null;
         var size = new System.Windows.Media.Imaging.BitmapImage(new Uri(Path.GetFullPath(shot)));
         var client = new Rect(0, 0, size.PixelWidth, size.PixelHeight);
-        var f = new OverlayFrame(client, true, layout, null, at, true, null, "", Mini: true, Heading: heading);
+        double? camera = Environment.GetEnvironmentVariable("SH_CAMERA") is { Length: > 0 } cam ? double.Parse(cam, System.Globalization.CultureInfo.InvariantCulture) : null;
+        var f = new OverlayFrame(client, true, layout, null, at, true, null, "", Mini: true, Heading: heading, Camera: camera);
         string tag = layout.IsIsland ? "island" : $"L{layout.Number}";
         foreach (var mode in OverlayView.MiniMapStyles.Select(x => x.Value).Where(v => v != "Off"))
             RenderOverlay(shot, Path.Combine(outDir, $"{tag}_{mode}.png"), db, new Settings { MiniMapMode = mode }, f);
@@ -189,14 +190,44 @@ public static class Analyzer
     static void RenderOverlay(string shot, string outPath, LayoutDb db, Settings settings, OverlayFrame f, bool placing = false)
     {
         var bg = new System.Windows.Media.Imaging.BitmapImage(new Uri(Path.GetFullPath(shot)));
-        var view = new OverlayView(db, settings) { Preview = true, PreviewUi = Regions.Ui(f.Client.Width, f.Client.Height), Frame = f, Placing = placing, PlacementClient = f.Client };
+        // SH_LIVE=1: drawn as the overlay is, not as a preview (it then decodes in the background, with that switch on: waits for it).
+        bool live = Environment.GetEnvironmentVariable("SH_LIVE") == "1";
+        var view = new OverlayView(db, settings) { Preview = !live, PreviewUi = Regions.Ui(f.Client.Width, f.Client.Height), Frame = f, Placing = placing, PlacementClient = f.Client, RetainInPreview = Dev.RetainedMap || Environment.GetEnvironmentVariable("SH_TOGGLE") == "1" };
         var size = new System.Windows.Size(f.Client.Width, f.Client.Height);
+        long firstAt = Stopwatch.GetTimestamp();
         view.Measure(size); view.Arrange(new System.Windows.Rect(size));
+        if (live) File.AppendAllText(outPath + ".txt", $"first draw held the display thread {(Stopwatch.GetTimestamp() - firstAt) * 1000.0 / Stopwatch.Frequency:0} ms" + Environment.NewLine);
+        long before = view.Renders;
+        bool waited = view.Decoding;
+        for (int i = 0; i < 500 && view.Decoding; i++)
+        {
+            System.Threading.Thread.Sleep(10);
+            view.Dispatcher.Invoke(() => { }, System.Windows.Threading.DispatcherPriority.Background);
+        }
+        if (waited) { view.UpdateLayout(); File.AppendAllText(outPath + ".txt", $"art came after the first draw, redraws {view.Renders - before}" + Environment.NewLine); before = view.Renders; }
+        // SH_TOGGLE=1: flips the retained switch with the picture up, as the Dev tab can, then a frame comes.
+        if (Environment.GetEnvironmentVariable("SH_TOGGLE") == "1")
+        {
+            Dev.RetainedMap = !Dev.RetainedMap;
+            view.InvalidateVisual();
+            view.UpdateLayout();
+            File.AppendAllText(outPath + ".txt", $"flipped, now on {Dev.RetainedMap}, drawn retained {view.RetainedLive}" + Environment.NewLine);
+            Dev.RetainedMap = !Dev.RetainedMap;
+            before = view.Renders;
+        }
+        // SH_MOVE=x,y,heading: as a walking frame does, moves what's already drawn to there. Writes whether that took a redraw.
+        if (Environment.GetEnvironmentVariable("SH_MOVE") is { Length: > 0 } move && view.RetainedLive)
+        {
+            var v = move.Split(',').Select(x => double.Parse(x, System.Globalization.CultureInfo.InvariantCulture)).ToArray();
+            bool moved = view.MoveForTest(new Point2d(v[0], v[1]), v[2], v.Length > 3 ? v[3] : f.Camera);
+            File.AppendAllText(outPath + ".txt", $"moved {moved}" + Environment.NewLine);
+        }
         var dv = new System.Windows.Media.DrawingVisual();
         using (var dc = dv.RenderOpen()) dc.DrawImage(bg, new System.Windows.Rect(size));
         var rtb = new System.Windows.Media.Imaging.RenderTargetBitmap(f.Client.Width, f.Client.Height, 96, 96, System.Windows.Media.PixelFormats.Pbgra32);
         rtb.Render(dv);
         rtb.Render(view);
+        if (Environment.GetEnvironmentVariable("SH_MOVE") is { Length: > 0 }) File.AppendAllText(outPath + ".txt", $"redraws to show it {view.Renders - before}" + Environment.NewLine);
         var enc = new System.Windows.Media.Imaging.PngBitmapEncoder();
         enc.Frames.Add(System.Windows.Media.Imaging.BitmapFrame.Create(rtb));
         using var fs = File.Create(outPath);
