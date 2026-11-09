@@ -250,6 +250,7 @@ public sealed class Engine : IDisposable
     IReadOnlyList<Layout> AllCandidates()
     {
         if (settings.ForcedLayout != 0 && db.ByNumber(settings.ForcedLayout) is Layout forced) return [forced];
+        if (LayoutSource == GameLogSource && CurrentLayout is Layout told) return [told];
         var c = db.Candidates(EffectiveDifficulty);
         return c.Count > 0 ? c : db.Candidates(null);
     }
@@ -261,6 +262,8 @@ public sealed class Engine : IDisposable
         var c = db.Candidates(EffectiveDifficulty);
         return c.Count > 0 ? c : db.Candidates(null);
     }
+
+    const string GameLogSource = "game log";
 
     void Lock(Layout l, string source)
     {
@@ -917,6 +920,18 @@ public sealed class Engine : IDisposable
             if (!noPicture && MapScreenOpen(head, c)) minimap.HoldStill();
         }
         if (!InRun) { misfitSince = null; return; }
+        // The game's own log names the Sanctum as it loads: no working it out from the minimap, and no wrong guess.
+        if (settings.ForcedLayout == 0 && settings.UseGameLog && gameLog.Where == GameLog.Place.Sanctum && gameLog.SanctumScene is int named
+            && CurrentLayout?.Scene != named && db.Layouts.FirstOrDefault(l => l.Scene == named) is Layout told)
+        {
+            Lock(told, GameLogSource);
+            ClearGuesses();
+            lastPose = null; player = null;
+            minimap.Reset();
+            // Just loaded: at the orange door, where every run enters. Later (Sanctum Helper started mid-run): the whole map is searched.
+            if ((DateTime.UtcNow - gameLog.SanctumNamedAt).TotalSeconds < 15) minimap.Seed(new Point2d(told.Orange.Img[0], told.Orange.Img[1]));
+            layout = told;
+        }
         // A chest, shop or other screen covering the HUD (timer match ~0.27 under it, vs 0.65+
         // for the usual flicker): the minimap is hidden, so skip it instead of counting misses.
         if (lastTimerScore < 0.5 && !timerTemplate!.Empty()) { misfitSince = null; return; }
@@ -965,7 +980,7 @@ public sealed class Engine : IDisposable
             // show plenty of floor count, so menus, chests and corridor glimpses don't.
             if (pos != null || !hudVisible) misfitSince = null;
             else if (!minimap.LastInfo.StartsWith("minimap: too little")) misfitSince ??= now;
-            if (misfitSince is DateTime ms && (now - ms).TotalSeconds > 30 && settings.ForcedLayout == 0 && CurrentLayout != null)
+            if (misfitSince is DateTime ms && (now - ms).TotalSeconds > 30 && settings.ForcedLayout == 0 && CurrentLayout != null && LayoutSource != GameLogSource)
             {
                 Log.Write($"{CurrentLayout.Title} hasn't matched the minimap for 30 s: identifying the layout again, every difficulty");
                 misfitSince = null;
@@ -1195,7 +1210,8 @@ public sealed class Engine : IDisposable
         if (where == GameLog.Place.Sanctum && CurrentLayout == null && settings.ForcedLayout == 0)
         {
             var cands = db.Candidates(EffectiveDifficulty);
-            ThreadPool.QueueUserWorkItem(_ => { try { foreach (var l in cands) arts.Get(l); } catch (Exception e) { Log.Write("preload: " + e.Message); } });
+            // (The game names the Sanctum in the next moments: then only that one is needed, not up to 30 layouts' art.)
+            ThreadPool.QueueUserWorkItem(_ => { Thread.Sleep(1500); if (gameLog.SanctumScene != null) return; try { foreach (var l in cands) arts.Get(l); } catch (Exception e) { Log.Write("preload: " + e.Message); } });
         }
         switch (where)
         {
@@ -1810,7 +1826,7 @@ public sealed class Engine : IDisposable
         {
             lastPose = pose;
             lastPoseTime = DateTime.UtcNow;
-            if (settings.ForcedLayout == 0) Lock(pose.Layout, "map");
+            if (settings.ForcedLayout == 0 && LayoutSource != GameLogSource) Lock(pose.Layout, "map");
         }
         else if (lastPose != null && doors.LastMapOpen && (DateTime.UtcNow - lastPoseTime).TotalSeconds < 0.4)
         {
