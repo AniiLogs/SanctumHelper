@@ -125,11 +125,15 @@ public sealed class GameLog
         if (line.Contains("connect to worldx-") && Connect.Match(line) is { Success: true } c)
         {
             server = c.Groups[1].Value; // ms (login), line, singleworld, dungeon, ...
-            if (server != "dungeon") { interlink = false; pendingId = null; }
+            // Any new server ends the rooms below: leaving them can log no connect at all, so the next one may be a dungeon
+            // (8 Nov: an Interlink run, back with no connect, then a whole Egg Heist run read as elsewhere). If it's another
+            // of those rooms, it names itself again before the wait for a new run is over.
+            interlink = false;
+            if (server != "dungeon") pendingId = null;
             return;
         }
         // Interlink rooms and Holo-Battle Sim are dungeon areas too: the game names their scene (".._fb_bossrush..",
-        // ".._fb_roguelike..") about a second after the area loads. From then until the next non-dungeon server,
+        // ".._fb_roguelike..") about a second after the area loads. From then until the next server connect,
         // nothing is Egg Heist.
         if (line.Contains("fb_bossrush") || line.Contains("fb_roguelike"))
         {
@@ -165,8 +169,8 @@ public sealed class GameLog
 
     /// <summary>The screen showed what Egg Heist never has (a challenge's "Victory Conditions" panel): this dungeon area
     /// isn't Egg Heist after all. A Pathfinder challenge loads like an island and names no scene in the log (7 Nov:
-    /// the island map popped up over one). Like an Interlink room, nothing is Egg Heist until the next non-dungeon
-    /// server.</summary>
+    /// the island map popped up over one). Like an Interlink room, nothing is Egg Heist until the next server
+    /// connect.</summary>
     public void NotEggHeist()
     {
         pendingId = null;
