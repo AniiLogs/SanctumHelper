@@ -125,6 +125,7 @@ public sealed class Engine : IDisposable
     readonly MapMatcher matcher;
     readonly DoorLocator doors;
     readonly IslandTracker islandTracker;
+    System.Threading.Tasks.Task? islandArtLoad;
     readonly HeadingDetector headingDetector;
     double? heading;          // degrees clockwise from north, smoothed
     DateTime headingTime;
@@ -306,6 +307,7 @@ public sealed class Engine : IDisposable
                 {
                     resetRequested = false;
                     CurrentLayout = null; lastPose = null; player = null; minimap.Reset();
+                    prevGray?.Dispose(); prevGray = null; prevGrayPose = null;
                     onIsland = false; islandPlayer = null; islandPose = null; islandTracker.Reset(); islandTracker.Release();
                     ClearGuesses();
                     arts.Trim(_ => false); refiner.Trim(_ => false); minimap.Release(); features.Trim(_ => false);
@@ -349,22 +351,28 @@ public sealed class Engine : IDisposable
                 if (now >= nextPerfLog)
                 {
                     nextPerfLog = now + 10000;
-                    var mem = System.Diagnostics.Process.GetCurrentProcess().PrivateMemorySize64 / (1 << 20);
+                    var mem = PrivateMb();
                     // OpenCV's pictures live outside .NET's memory, so .NET doesn't see them pile up: one that
                     // isn't disposed waits for a collection, and with little else allocating (in a run, no party
                     // screen reads) that can be minutes - a report showed 850 MB growing to 1.4 GB again and again.
                     // Grown by 150 MB since the last collection: collect now, and say what that freed.
+                    // Off this thread: waiting for the finalizers here held up the map.
                     if (mem - memAfterCollect > 150)
                     {
-                        GC.Collect();
-                        GC.WaitForPendingFinalizers();
-                        GC.Collect();
-                        var after = System.Diagnostics.Process.GetCurrentProcess().PrivateMemorySize64 / (1 << 20);
-                        Log.Write($"memory: collected {mem - after} MB ({mem} -> {after} MB)");
-                        memAfterCollect = mem = after;
+                        memAfterCollect = mem;
+                        long before = mem;
+                        System.Threading.Tasks.Task.Run(() =>
+                        {
+                            GC.Collect();
+                            GC.WaitForPendingFinalizers();
+                            GC.Collect();
+                            var after = PrivateMb();
+                            Log.Write($"memory: collected {before - after} MB ({before} -> {after} MB)");
+                            memAfterCollect = after;
+                        });
                     }
                     else if (mem < memAfterCollect) memAfterCollect = mem;     // (the first line sets it)
-                    Log.Write($"perf: track {perfTrack.Report()} · heading {perfHeading.Report()} · ocr {perfOcr.Report()} · overlay {OverlayView.Perf.Report()} · {mem} MB"
+                    Log.Write($"perf: track {perfTrack.Report()} · locate {perfLocate.Report()} · heading {perfHeading.Report()} · ocr {perfOcr.Report()} · overlay {OverlayView.Perf.Report()} · {mem} MB"
                         + $" · capture {perfSource}{(perfSource.StartsWith("shared") ? $" ({SharedCapture.CopyMs:0.0} ms)" : "")}"
                         + $" · run timer {lastTimerScore:0.00}{(InRun ? " (in a run)" : "")}");
                 }
@@ -709,6 +717,11 @@ public sealed class Engine : IDisposable
 
     bool printWindowFailed;
     bool sharedScreenCopy;
+    static long PrivateMb()
+    {
+        using var me = System.Diagnostics.Process.GetCurrentProcess();
+        return me.PrivateMemorySize64 / (1 << 20);
+    }
     long memAfterCollect = long.MaxValue / 2;  // MB right after the last collection (set by the first perf line)                    // the overlay was hidden because shared frames are screen copies
     string perfSource = "-";                  // where the last whole frame came from, for the perf line
     int windowCaptureMisses;
@@ -903,10 +916,10 @@ public sealed class Engine : IDisposable
             SharedCapture.StillScreen = false;
             if (!noPicture && MapScreenOpen(head, c)) minimap.HoldStill();
         }
-        if (!InRun) return;
+        if (!InRun) { misfitSince = null; return; }
         // A chest, shop or other screen covering the HUD (timer match ~0.27 under it, vs 0.65+
         // for the usual flicker): the minimap is hidden, so skip it instead of counting misses.
-        if (lastTimerScore < 0.5 && !timerTemplate!.Empty()) return;
+        if (lastTimerScore < 0.5 && !timerTemplate!.Empty()) { misfitSince = null; return; }
         using var mm = new Mat(top, InCorner(rc, corner));
         var now = DateTime.UtcNow;
         bool logNow = clock.ElapsedMilliseconds - lastMinimapLog > 3000;
@@ -940,20 +953,24 @@ public sealed class Engine : IDisposable
         // light grey and can pass as Sanctum floor, and Sanctum views can near-tie on the island.
         if (slowTick) outsideStreak = islandLike ? outsideStreak + 1 : 0;
         bool trySanctum = !islandLike && layout != null;
+        if (!trySanctum) misfitSince = null;
 
         if (trySanctum)
         {
+            var tLocate = perfClock.ElapsedTicks;
             var pos = minimap.Locate(mm, layout!, ui);
+            perfLocate.Add(perfClock.ElapsedTicks - tLocate);
             if (logNow) Log.Write($"{minimap.LastInfo} -> {(pos == null ? "rejected" : "ok")} ({layout!.Title})");
             // A wrong layout (e.g. locked from a stale difficulty) never matches. Only frames that
             // show plenty of floor count, so menus, chests and corridor glimpses don't.
-            if (pos != null || !hudVisible || minimap.LastInfo.StartsWith("minimap: too little")) { if (pos != null) misfitSince = null; }
-            else misfitSince ??= now;
+            if (pos != null || !hudVisible) misfitSince = null;
+            else if (!minimap.LastInfo.StartsWith("minimap: too little")) misfitSince ??= now;
             if (misfitSince is DateTime ms && (now - ms).TotalSeconds > 30 && settings.ForcedLayout == 0 && CurrentLayout != null)
             {
                 Log.Write($"{CurrentLayout.Title} hasn't matched the minimap for 30 s: identifying the layout again, every difficulty");
                 misfitSince = null;
                 CurrentLayout = null; LayoutSource = ""; lastPose = null; player = null; minimap.Reset();
+                prevGray?.Dispose(); prevGray = null; prevGrayPose = null;
                 settings.RunLayout = 0;
                 difficultyDoubted = true;
                 ClearGuesses();
@@ -977,6 +994,12 @@ public sealed class Engine : IDisposable
         var step = MinimapStep(mm, ui);
         Point2d? dead = onIsland && islandPlayer is Point2d cur0 && (now - islandTime).TotalSeconds < 3
             ? new Point2d(cur0.X + (step?.X ?? 0), cur0.Y + (step?.Y ?? 0)) : null;
+        // The island's art takes a second or so to load: on its own thread, not this one, which would stop following meanwhile.
+        if (!arts.BgrReady(isl))
+        {
+            if (islandArtLoad is not { IsCompleted: false }) islandArtLoad = System.Threading.Tasks.Task.Run(() => { _ = arts.Get(isl).Bgr; });
+            return;
+        }
         // A Sanctum portal icon in view pins the position exactly, even on open ground where the
         // minimap shows nothing to match (big grass fields): it overrides a drifting image match.
         if (islandSearch == null && IslandLandmark(mm, ui, isl) is Point2d lm)
@@ -997,6 +1020,7 @@ public sealed class Engine : IDisposable
         }
         if (islandArrival != null && islandSearch == null)
         {
+            if (!slowTick) return;   // (a look at every landing spot: ~20 a second is plenty)
             Point2d? best = null;
             double bestScore = 0;
             foreach (var m in isl.Markers.Where(m => m.Kind == islandArrival))
@@ -1041,7 +1065,12 @@ public sealed class Engine : IDisposable
             islandSearch = null;
             fromSearch = logNow = true;
         }
-        else if (islandTracker.Tracking) ip = islandTracker.Locate(mm, isl, ui, false);
+        else if (islandTracker.Tracking)
+        {
+            var tLocate = perfClock.ElapsedTicks;
+            ip = islandTracker.Locate(mm, isl, ui, false);
+            perfLocate.Add(perfClock.ElapsedTicks - tLocate);
+        }
         else
         {
             if (clock.ElapsedMilliseconds - lastIslandSearch < 1200) return;
@@ -1247,7 +1276,7 @@ public sealed class Engine : IDisposable
     readonly Gamepad pad = new();
     // Timings for the "perf:" log line (every 10 s): how long and how often each part runs.
     static readonly Stopwatch perfClock = Stopwatch.StartNew();
-    readonly PerfStat perfTrack = new(), perfHeading = new(), perfOcr = new();
+    readonly PerfStat perfTrack = new(), perfLocate = new(), perfHeading = new(), perfOcr = new();
     bool padWasDown;
     System.Threading.Tasks.Task<Point2d?>? islandSearch;
 
@@ -1297,6 +1326,46 @@ public sealed class Engine : IDisposable
     }
 
     /// <param name="small">The HUD corner at 1080p size.</param>
+    Point? timerAt;
+    bool timerRed;
+
+    /// <summary>The stopwatch doesn't move: first looked for right where it last was, the way it last matched (white or red, which
+    /// was the slow search after a failed one, every tick for a run's last 3 minutes). A clear hit settles it; anything else
+    /// searches the whole area.</summary>
+    bool TimerNearby(Mat small, Rect area, out double score)
+    {
+        score = 0;
+        if (timerAt is not Point at) return false;
+        var tpl = timerRed ? redTimer?.tpl : timerTemplate;
+        if (tpl == null || tpl.Empty()) return false;
+        const int Slack = 8;
+        var win = new Rect(area.X + at.X - Slack, area.Y + at.Y - Slack, tpl.Width + 2 * Slack, tpl.Height + 2 * Slack).Intersect(area);
+        if (win.Width <= tpl.Width || win.Height <= tpl.Height) return false;
+        using var part = new Mat(small, win);
+        using var res = new Mat();
+        double max;
+        Point loc;
+        if (timerRed)
+        {
+            Cv2.MatchTemplate(part, tpl, res, TemplateMatchModes.CCoeffNormed, redTimer!.Value.mask);
+            Cv2.PatchNaNs(res, -1);
+            Cv2.Threshold(res, res, 1.0, 0, ThresholdTypes.TozeroInv);
+            Cv2.MinMaxLoc(res, out _, out max, out _, out loc);
+            using var hit = new Mat(part, new Rect(loc, tpl.Size()));
+            using var v = ValueChannel(hit);
+            if (!Lit(v, new Rect(0, 0, v.Width, v.Height))) return false;
+        }
+        else
+        {
+            using var v = ValueChannel(part);
+            Cv2.MatchTemplate(v, tpl, res, TemplateMatchModes.CCoeffNormed);
+            Cv2.MinMaxLoc(res, out _, out max, out _, out loc);
+            if (!Lit(v, new Rect(loc, tpl.Size()))) return false;
+        }
+        score = max;
+        return max >= 0.7;
+    }
+
     void UpdateInRun(Mat small)
     {
         // Compared on brightness only (HSV value): the timer turns red under 3 minutes, and red
@@ -1317,7 +1386,8 @@ public sealed class Engine : IDisposable
         {
             var area = new Rect(15, 340, 140, 320).Intersect(new Rect(0, 0, small.Width, small.Height));
             seen = false;
-            if (area.Width > timerTemplate.Width && area.Height > timerTemplate.Height)
+            if (TimerNearby(small, area, out double closeBy)) { lastTimerScore = closeBy; seen = true; }
+            else if (area.Width > timerTemplate.Width && area.Height > timerTemplate.Height)
             {
                 using var res = new Mat();
                 using var part = new Mat(small, area);
@@ -1327,6 +1397,7 @@ public sealed class Engine : IDisposable
                 // The match ignores brightness: the stopwatch dimmed by a fade to black still matched, so the run
                 // looked on and the on-screen map stayed up over the black. Only a lit stopwatch counts.
                 if (!Lit(v, new Rect(at, timerTemplate.Size()))) max = 0;
+                if (max >= 0.7) { timerAt = at; timerRed = false; }
                 // Under 3 minutes the stopwatch becomes a red disc with a white running figure:
                 // same brightness inside, so that one is matched in color, inside its circle.
                 if (max < 0.7 && redTimer is { } red && !red.tpl.Empty())
@@ -1339,7 +1410,11 @@ public sealed class Engine : IDisposable
                     Cv2.MinMaxLoc(r2, out _, out double redMax, out _, out Point redAt);
                     using var redPart = new Mat(area2, new Rect(redAt, red.tpl.Size()));
                     using var redV = ValueChannel(redPart);
-                    if (Lit(redV, new Rect(0, 0, redV.Width, redV.Height))) max = Math.Max(max, redMax);
+                    if (Lit(redV, new Rect(0, 0, redV.Width, redV.Height)))
+                    {
+                        max = Math.Max(max, redMax);
+                        if (redMax >= 0.7) { timerAt = redAt; timerRed = true; }
+                    }
                 }
                 lastTimerScore = max;
                 // seen at 0.7, lost below 0.55: scores hover near 0.7 over bright floor, which flipped it
@@ -1649,7 +1724,8 @@ public sealed class Engine : IDisposable
         MapPose? guess = doorPose;
         string src = doorPose != null ? "doors" : "";
         using var panNow = doors.LastMapOpen ? PanImage(frame!) : null;
-        if (guess == null && panNow != null && prevGray != null && prevGrayPose != null && prevGray.Size() == panNow.Size())
+        if (guess == null && panNow != null && prevGray != null && prevGrayPose != null && prevGray.Size() == panNow.Size()
+            && (CurrentLayout == null || prevGrayPose.Layout.Number == CurrentLayout.Number))
         {
             using var win = new Mat();
             Cv2.CreateHanningWindow(win, panNow.Size(), MatType.CV_32F);
