@@ -40,6 +40,9 @@ public sealed class GameLog
     // A homeland is "100-<player id>-550" (anyone's): nothing is read there for now (it is heavy on the game already)
     static readonly Regex HomelandId = new(@"^\d+-\d+-550$", RegexOptions.Compiled);
 
+    // Areas loaded from a server that isn't a dungeon: going back to one logs no connect (8 Nov: the lobby, after an Egg Heist run,
+    // counted as a new run's island, and the run's maps were never let go).
+    readonly System.Collections.Generic.HashSet<string> outside = new();
     readonly string path;
     long pos;
     readonly Decoder decoder = Encoding.UTF8.GetDecoder();
@@ -143,7 +146,8 @@ public sealed class GameLog
         }
         if (!line.Contains("createVoxelScene") || Scene.Match(line) is not { Success: true } m) return;
         string id = m.Groups[1].Value;
-        if (server != "dungeon" || interlink)
+        if (server != "dungeon") outside.Add(id);
+        if (server != "dungeon" || interlink || outside.Contains(id))
         {
             islandId = sanctumId = pendingId = null;
             Set(HomelandId.IsMatch(id) ? Place.Homeland : Place.Elsewhere, false);
