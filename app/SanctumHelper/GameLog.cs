@@ -23,6 +23,13 @@ public sealed class GameLog
     /// <summary>The island id of the current run (changes with every run).</summary>
     public string? RunId => islandId;
     public bool Available { get; private set; }
+    /// <summary>The game scene of this run's Sanctum, as the game named it while loading it (200NN is Layout NN), or null.
+    /// In 9 runs out of 9 it agreed with the layout the minimap settled on, 17-46 s before it did, and in one run the
+    /// minimap's first answer was wrong. It's a warning the game logs (a light-probe file it doesn't ship), so a patch could
+    /// take it away: then this stays null and the layout is worked out from the minimap as before.</summary>
+    public int? SanctumScene { get; private set; }
+    /// <summary>When the Sanctum was named: right after that, the player is at its orange door.</summary>
+    public DateTime SanctumNamedAt { get; private set; }
 
     /// <summary>Raised from Poll on each change seen live (not while catching up at startup):
     /// the new place, and whether it began a new run.</summary>
@@ -37,6 +44,7 @@ public sealed class GameLog
     DateTime pendingAt;
     static readonly TimeSpan PendingFor = TimeSpan.FromSeconds(3);
     static readonly Regex Scene = new(@"createVoxelScene new>>>id:(\S+)", RegexOptions.Compiled);
+    static readonly Regex SanctumName = new(@"scene='Level_FB_Random_Map_(\d+)'", RegexOptions.Compiled);
     // A homeland is "100-<player id>-550" (anyone's): nothing is read there for now (it is heavy on the game already)
     static readonly Regex HomelandId = new(@"^\d+-\d+-550$", RegexOptions.Compiled);
 
@@ -69,6 +77,7 @@ public sealed class GameLog
                 // The game restarted and began a new log.
                 pos = 0; partial.Clear(); decoder.Reset();
                 server = islandId = sanctumId = pendingId = null;
+                SanctumScene = null;
                 Set(Place.Unknown, false);
             }
             Available = true;
@@ -132,7 +141,22 @@ public sealed class GameLog
             // (8 Nov: an Interlink run, back with no connect, then a whole Egg Heist run read as elsewhere). If it's another
             // of those rooms, it names itself again before the wait for a new run is over.
             interlink = false;
-            if (server != "dungeon") pendingId = null;
+            if (server != "dungeon") { pendingId = null; SanctumScene = null; }
+            return;
+        }
+        if (line.Contains("Level_FB_Random_Map_"))
+        {
+            if (SanctumName.Match(line) is { Success: true } named && int.TryParse(named.Groups[1].Value, out int scene) && Where == Place.Sanctum)
+            {
+                SanctumScene = scene;
+                SanctumNamedAt = DateTime.UtcNow;
+            }
+            return;
+        }
+        // Egg Heist's island names itself the same way: no need to wait to see that no other scene gets named.
+        if (line.Contains("Level_BW_GrabEggs"))
+        {
+            if (pendingId != null) Settle(force: true);
             return;
         }
         // Interlink rooms and Holo-Battle Sim are dungeon areas too: the game names their scene (".._fb_bossrush..",
@@ -141,6 +165,7 @@ public sealed class GameLog
         if (line.Contains("fb_bossrush") || line.Contains("fb_roguelike"))
         {
             pendingId = null;
+            SanctumScene = null;
             if (!interlink) { interlink = true; islandId = sanctumId = null; Set(Place.Elsewhere, false); }
             return;
         }
@@ -188,6 +213,7 @@ public sealed class GameLog
     {
         if (pendingId == null || (!force && DateTime.UtcNow - pendingAt < PendingFor)) return;
         islandId = pendingId; sanctumId = null; pendingId = null;
+        SanctumScene = null;
         Set(Place.Island, true);
     }
 
