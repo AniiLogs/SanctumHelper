@@ -484,6 +484,11 @@ public sealed class MinimapTracker(MapArtCache arts)
     /// is ambiguous when a layout repeats room shapes; a local search from a known spot isn't.</summary>
     public void Seed(Point2d pos) { last = pos; vel = default; seededAt = filterTime = DateTime.UtcNow; }
 
+    /// <summary>The in-game map screen is up: the player can't move there, so the last fix stays good and doesn't age. Back out,
+    /// the minimap is matched around that very spot at once, with no wider search (it grew 60 px a second while the map was open,
+    /// and look-alike rooms then took the fix away).</summary>
+    public void HoldStill() { if (last == null) return; vel = default; lastOk = filterTime = DateTime.UtcNow; }
+
     /// <summary>Colored parts of map icons (blue/cyan doors and eggs, orange door), dilated.</summary>
     public static Mat IconMask(Mat hsv, int margin)
     {
