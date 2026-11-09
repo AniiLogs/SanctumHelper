@@ -293,6 +293,7 @@ public sealed class Engine : IDisposable
         arts.Trim(n => n == l.Number); refiner.Trim(n => n == l.Number); minimap.Release(n => n == l.Number); features.Trim(n => n == l.Number);
         PrepareFeatures(l);
         Notify?.Invoke(Lang.F("Sanctum found #{0}", l.Number), null);
+        if (Dev.ReleaseOnLock) ClearGuesses();
         StatusChanged?.Invoke();
     }
 
@@ -310,7 +311,7 @@ public sealed class Engine : IDisposable
                 {
                     resetRequested = false;
                     CurrentLayout = null; lastPose = null; player = null; minimap.Reset();
-                    prevGray?.Dispose(); prevGray = null; prevGrayPose = null;
+                    if (Dev.OldPanFix) { prevGray?.Dispose(); prevGray = null; prevGrayPose = null; }
                     onIsland = false; islandPlayer = null; islandPose = null; islandTracker.Reset(); islandTracker.Release();
                     ClearGuesses();
                     arts.Trim(_ => false); refiner.Trim(_ => false); minimap.Release(); features.Trim(_ => false);
@@ -360,7 +361,16 @@ public sealed class Engine : IDisposable
                     // screen reads) that can be minutes - a report showed 850 MB growing to 1.4 GB again and again.
                     // Grown by 150 MB since the last collection: collect now, and say what that freed.
                     // Off this thread: waiting for the finalizers here held up the map.
-                    if (mem - memAfterCollect > 150)
+                    if (mem - memAfterCollect > 150 && !Dev.GcThread)
+                    {
+                        GC.Collect();
+                        GC.WaitForPendingFinalizers();
+                        GC.Collect();
+                        var after = PrivateMb();
+                        Log.Write($"memory: collected {mem - after} MB ({mem} -> {after} MB)");
+                        memAfterCollect = mem = after;
+                    }
+                    else if (mem - memAfterCollect > 150)
                     {
                         memAfterCollect = mem;
                         long before = mem;
@@ -377,7 +387,8 @@ public sealed class Engine : IDisposable
                     else if (mem < memAfterCollect) memAfterCollect = mem;     // (the first line sets it)
                     Log.Write($"perf: track {perfTrack.Report()} · locate {perfLocate.Report()} · heading {perfHeading.Report()} · ocr {perfOcr.Report()} · overlay {OverlayView.Perf.Report()} · {mem} MB"
                         + $" · capture {perfSource}{(perfSource.StartsWith("shared") ? $" ({SharedCapture.CopyMs:0.0} ms)" : "")}"
-                        + $" · run timer {lastTimerScore:0.00}{(InRun ? " (in a run)" : "")}");
+                        + $" · run timer {lastTimerScore:0.00}{(InRun ? " (in a run)" : "")}"
+                        + $" · dev on: {(Dev.On() is { Length: > 0 } devOn ? string.Join(",", devOn) : "none")}");
                 }
                 if (settings.UseGameLog && now >= nextGameLog)
                 {
@@ -545,7 +556,7 @@ public sealed class Engine : IDisposable
                 if (!GameFound || !game.IsForeground || !InRun) { Thread.Sleep(150); continue; }
                 var c = game.Client;
                 double ui = Regions.Ui(c.Width, c.Height);
-                var rc = Regions.ToClient(settings.MinimapRegion, Anchor.TopLeft, c.Width, c.Height);
+                var rc = Regions.ToClient(Dev.Region(settings.MinimapRegion), Anchor.TopLeft, c.Width, c.Height);
                 if (rc.Width < 40) { Thread.Sleep(250); continue; }
                 // One copy of the HUD corner per cycle, for the arrow/cone here and for tracking. With the aLogs app
                 // running it comes from the app's GPU capture (only this corner leaves the graphics card); a screen
@@ -886,7 +897,7 @@ public sealed class Engine : IDisposable
         var layout = settings.ForcedLayout != 0 ? db.ByNumber(settings.ForcedLayout) : CurrentLayout;
         var c = game.Client;
         double ui = Regions.Ui(c.Width, c.Height);
-        var rc = Regions.ToClient(settings.MinimapRegion, Anchor.TopLeft, c.Width, c.Height);
+        var rc = Regions.ToClient(Dev.Region(settings.MinimapRegion), Anchor.TopLeft, c.Width, c.Height);
         if (rc.Width < 40) return;
         // One grab for the HUD corner: minimap, the Esc button, and the run timer below them.
         var corner = CornerRect(rc, c);
@@ -919,9 +930,9 @@ public sealed class Engine : IDisposable
             SharedCapture.StillScreen = false;
             if (!noPicture && MapScreenOpen(head, c)) minimap.HoldStill();
         }
-        if (!InRun) { misfitSince = null; return; }
+        if (!InRun) { if (Dev.MisfitFix) misfitSince = null; return; }
         // The game's own log names the Sanctum as it loads: no working it out from the minimap, and no wrong guess.
-        if (settings.ForcedLayout == 0 && settings.UseGameLog && gameLog.Where == GameLog.Place.Sanctum && gameLog.SanctumScene is int named
+        if (Dev.LogLayout && settings.ForcedLayout == 0 && settings.UseGameLog && gameLog.Where == GameLog.Place.Sanctum && gameLog.SanctumScene is int named
             && CurrentLayout?.Scene != named && db.Layouts.FirstOrDefault(l => l.Scene == named) is Layout told)
         {
             Lock(told, GameLogSource);
@@ -934,7 +945,7 @@ public sealed class Engine : IDisposable
         }
         // A chest, shop or other screen covering the HUD (timer match ~0.27 under it, vs 0.65+
         // for the usual flicker): the minimap is hidden, so skip it instead of counting misses.
-        if (lastTimerScore < 0.5 && !timerTemplate!.Empty()) { misfitSince = null; return; }
+        if (lastTimerScore < 0.5 && !timerTemplate!.Empty()) { if (Dev.MisfitFix) misfitSince = null; return; }
         using var mm = new Mat(top, InCorner(rc, corner));
         var now = DateTime.UtcNow;
         bool logNow = clock.ElapsedMilliseconds - lastMinimapLog > 3000;
@@ -968,7 +979,7 @@ public sealed class Engine : IDisposable
         // light grey and can pass as Sanctum floor, and Sanctum views can near-tie on the island.
         if (slowTick) outsideStreak = islandLike ? outsideStreak + 1 : 0;
         bool trySanctum = !islandLike && layout != null;
-        if (!trySanctum) misfitSince = null;
+        if (!trySanctum && Dev.MisfitFix) misfitSince = null;
 
         if (trySanctum)
         {
@@ -978,14 +989,15 @@ public sealed class Engine : IDisposable
             if (logNow) Log.Write($"{minimap.LastInfo} -> {(pos == null ? "rejected" : "ok")} ({layout!.Title})");
             // A wrong layout (e.g. locked from a stale difficulty) never matches. Only frames that
             // show plenty of floor count, so menus, chests and corridor glimpses don't.
-            if (pos != null || !hudVisible) misfitSince = null;
-            else if (!minimap.LastInfo.StartsWith("minimap: too little")) misfitSince ??= now;
+            if (pos != null || (Dev.MisfitFix && !hudVisible)) misfitSince = null;
+            else if (!hudVisible || minimap.LastInfo.StartsWith("minimap: too little")) { /* says nothing about the layout */ }
+            else misfitSince ??= now;
             if (misfitSince is DateTime ms && (now - ms).TotalSeconds > 30 && settings.ForcedLayout == 0 && CurrentLayout != null && LayoutSource != GameLogSource)
             {
                 Log.Write($"{CurrentLayout.Title} hasn't matched the minimap for 30 s: identifying the layout again, every difficulty");
                 misfitSince = null;
                 CurrentLayout = null; LayoutSource = ""; lastPose = null; player = null; minimap.Reset();
-                prevGray?.Dispose(); prevGray = null; prevGrayPose = null;
+                if (Dev.OldPanFix) { prevGray?.Dispose(); prevGray = null; prevGrayPose = null; }
                 settings.RunLayout = 0;
                 difficultyDoubted = true;
                 ClearGuesses();
@@ -1010,7 +1022,7 @@ public sealed class Engine : IDisposable
         Point2d? dead = onIsland && islandPlayer is Point2d cur0 && (now - islandTime).TotalSeconds < 3
             ? new Point2d(cur0.X + (step?.X ?? 0), cur0.Y + (step?.Y ?? 0)) : null;
         // The island's art takes a second or so to load: on its own thread, not this one, which would stop following meanwhile.
-        if (!arts.BgrReady(isl))
+        if (Dev.IslandArtThread && !arts.BgrReady(isl))
         {
             if (islandArtLoad is not { IsCompleted: false }) islandArtLoad = System.Threading.Tasks.Task.Run(() => { _ = arts.Get(isl).Bgr; });
             return;
@@ -1035,7 +1047,7 @@ public sealed class Engine : IDisposable
         }
         if (islandArrival != null && islandSearch == null)
         {
-            if (!slowTick) return;   // (a look at every landing spot: ~20 a second is plenty)
+            if (Dev.ArrivalSlow && !slowTick) return;   // (a look at every landing spot: ~20 a second is plenty)
             Point2d? best = null;
             double bestScore = 0;
             foreach (var m in isl.Markers.Where(m => m.Kind == islandArrival))
@@ -1211,7 +1223,7 @@ public sealed class Engine : IDisposable
         {
             var cands = db.Candidates(EffectiveDifficulty);
             // (The game names the Sanctum in the next moments: then only that one is needed, not up to 30 layouts' art.)
-            ThreadPool.QueueUserWorkItem(_ => { Thread.Sleep(1500); if (gameLog.SanctumScene != null) return; try { foreach (var l in cands) arts.Get(l); } catch (Exception e) { Log.Write("preload: " + e.Message); } });
+            ThreadPool.QueueUserWorkItem(_ => { if (Dev.LogCandidates) { Thread.Sleep(1500); if (gameLog.SanctumScene != null) return; } try { foreach (var l in cands) arts.Get(l); } catch (Exception e) { Log.Write("preload: " + e.Message); } });
         }
         switch (where)
         {
@@ -1348,7 +1360,7 @@ public sealed class Engine : IDisposable
     /// <summary>The stopwatch doesn't move: first looked for right where it last was, the way it last matched (white or red, which
     /// was the slow search after a failed one, every tick for a run's last 3 minutes). A clear hit settles it; anything else
     /// searches the whole area.</summary>
-    bool TimerNearby(Mat small, Rect area, out double score)
+    bool TimerAtLastSpot(Mat small, Rect area, out double score)
     {
         score = 0;
         if (timerAt is not Point at) return false;
@@ -1402,7 +1414,7 @@ public sealed class Engine : IDisposable
         {
             var area = new Rect(15, 340, 140, 320).Intersect(new Rect(0, 0, small.Width, small.Height));
             seen = false;
-            if (TimerNearby(small, area, out double closeBy)) { lastTimerScore = closeBy; seen = true; }
+            if (Dev.TimerNearby && TimerAtLastSpot(small, area, out double closeBy)) { lastTimerScore = closeBy; seen = true; }
             else if (area.Width > timerTemplate.Width && area.Height > timerTemplate.Height)
             {
                 using var res = new Mat();
@@ -1741,7 +1753,7 @@ public sealed class Engine : IDisposable
         string src = doorPose != null ? "doors" : "";
         using var panNow = doors.LastMapOpen ? PanImage(frame!) : null;
         if (guess == null && panNow != null && prevGray != null && prevGrayPose != null && prevGray.Size() == panNow.Size()
-            && (CurrentLayout == null || prevGrayPose.Layout.Number == CurrentLayout.Number))
+            && (!Dev.OldPanFix || CurrentLayout == null || prevGrayPose.Layout.Number == CurrentLayout.Number))
         {
             using var win = new Mat();
             Cv2.CreateHanningWindow(win, panNow.Size(), MatType.CV_32F);

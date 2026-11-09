@@ -92,6 +92,7 @@ public sealed class OverlayWindow : Window
             double ui = Regions.Ui(f.Client.Width, f.Client.Height), m = 70 * ui; // room for labels, rim arrows, the legend
             Rect r;
             if (st == "Big") { r = OverlayView.BigPanel(settings, f.Client.Width, f.Client.Height, ui); m = 24 * ui; }  // its caption
+            else if (st == "Corner" && Dev.CornerMargin) { r = view.MiniPanel(st, f.Client.Width, f.Client.Height, ui); r = new Rect(r.X - 46 * ui, r.Y, r.Width + 92 * ui, r.Height); m = 24 * ui; }   // long captions, sideways
             else if (st == "Overlay") { r = OverlayView.SeeThroughArea(f.Client.Width, f.Client.Height); m = 0; }
             else r = view.MiniPanel(st, f.Client.Width, f.Client.Height, ui);
             r = new Rect(r.X - m, r.Y - m, r.Width + 2 * m, r.Height + 2 * m);
@@ -128,7 +129,7 @@ public sealed class OverlayWindow : Window
         view.Frame = f;
         bool egg = HeadingFeed.Egg;
         long nowMs = Environment.TickCount64;
-        bool sameLook = before != null && f is { Mini: true, Visible: true, Player: not null } && before.Player != null && egg == lastEgg && nowMs - lastRedraw < 250
+        bool sameLook = Dev.RedrawSkip && before != null && f is { Mini: true, Visible: true, Player: not null } && before.Player != null && egg == lastEgg && nowMs - lastRedraw < 250
             && before with { Player = f.Player, PlayerFresh = f.PlayerFresh, Heading = f.Heading, Velocity = f.Velocity, Stamp = f.Stamp, Camera = f.Camera } == f;
         lastEgg = egg;
         if (sameLook) return;
@@ -380,13 +381,13 @@ public sealed class OverlayView : FrameworkElement
     void Animate(object? sender, EventArgs e)
     {
         // WPF can raise this more than once for a display frame: nothing new to show the second time.
-        if (e is RenderingEventArgs re) { if (re.RenderingTime == lastRenderTime) return; lastRenderTime = re.RenderingTime; }
+        if (Dev.DuplicateTick && e is RenderingEventArgs re) { if (re.RenderingTime == lastRenderTime) return; lastRenderTime = re.RenderingTime; }
         var now = DateTime.UtcNow;
         double dt = Math.Min(0.1, (now - lastTick).TotalSeconds);
         lastTick = now;
         if (Frame is not { Mini: true, Visible: true, Player: OpenCvSharp.Point2d fix } fr) { shown = null; shownHeading = shownCamera = null; return; }
         // A different map's coordinates aren't a walk: start from the new spot, however close the numbers are.
-        if (fr.Layout?.Number is int onMap && onMap != shownLayout) { shownLayout = onMap; shown = null; }
+        if (Dev.GlideReset && fr.Layout?.Number is int onMap && onMap != shownLayout) { shownLayout = onMap; shown = null; }
         var (liveHeading, liveCamera, liveStamp) = HeadingFeed.Get();
         bool live = (now - liveStamp).TotalSeconds < 1.5;
         // ~15 ms (was 35): readings now come ~60 a second already smoothed, so this only bridges
@@ -1322,6 +1323,17 @@ public sealed class OverlayView : FrameworkElement
 
     static void Label(DrawingContext dc, string text, Point at, Color color, double size, bool above)
     {
+        if (!Dev.LabelCache)
+        {
+            var ft = new FormattedText(text, CultureInfo.InvariantCulture, FlowDirection.LeftToRight, Face, Math.Max(9, size), new SolidColorBrush(color), 1.0);
+            var origin = new Point(at.X - ft.Width / 2, above ? at.Y - ft.Height : at.Y);
+            var outline = ft.BuildGeometry(origin);
+            if (spin != 0) dc.PushTransform(new RotateTransform(spin, at.X, at.Y));
+            dc.DrawGeometry(null, new Pen(new SolidColorBrush(Color.FromArgb(220, 0, 0, 0)), Math.Max(2.5, size / 4)) { LineJoin = PenLineJoin.Round }, outline);
+            dc.DrawText(ft, origin);
+            if (spin != 0) dc.Pop();
+            return;
+        }
         var drawing = LabelDrawing(text, color, size, above);
         if (spin != 0) dc.PushTransform(new RotateTransform(spin, at.X, at.Y));
         dc.PushTransform(new TranslateTransform(at.X, at.Y));

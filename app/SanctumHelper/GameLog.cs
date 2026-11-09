@@ -156,7 +156,7 @@ public sealed class GameLog
         // Egg Heist's island names itself the same way: no need to wait to see that no other scene gets named.
         if (line.Contains("Level_BW_GrabEggs"))
         {
-            if (pendingId != null) Settle(force: true);
+            if (pendingId != null && Dev.LogIsland) Settle(force: true);
             return;
         }
         // Interlink rooms and Holo-Battle Sim are dungeon areas too: the game names their scene (".._fb_bossrush..",
