@@ -461,12 +461,7 @@ public sealed class Engine : IDisposable
                     perfOcr.Add(perfClock.ElapsedTicks - t0);
                     nextOcr = now + (onParty ? 500 : game.IsForeground ? 1000 : 1500);
                 }
-                if (!game.IsForeground) { HideMini(); Thread.Sleep(250); continue; }
-                // Out of Egg Heist (the game log has you back in Astra, the world or a homeland): the on-screen map is
-                // no longer updated below, so take down the last frame now. It stayed over Astra until the game lost
-                // focus (a player saw the Egg Heist map in Astra, 5 Nov).
-                if (!InEggHeist && miniShowing) { Log.Write("left Egg Heist: hiding the on-screen map"); HideMini(); }
-                // ...and the run's maps go too: what lets them go below runs only in Egg Heist, so out of it they stayed for good,
+                // The run's maps go once you've left, whatever is in front: what lets them go below runs only in Egg Heist, so out of it they stayed for good,
                 // adding up run after run (8 Nov: 1.6 GB held for half an hour between runs, 100 MB without them).
                 if (!InEggHeist && settings.ForcedLayout == 0 && (CurrentLayout != null || arts.Loaded > 0) && !resetRequested
                     && (DateTime.UtcNow - lastRunSeen).TotalSeconds > 90)
@@ -474,6 +469,11 @@ public sealed class Engine : IDisposable
                     Log.Write("out of Egg Heist for 90 s: letting the run's maps go");
                     ResetRun();
                 }
+                if (!game.IsForeground) { HideMini(); Thread.Sleep(250); continue; }
+                // Out of Egg Heist (the game log has you back in Astra, the world or a homeland): the on-screen map is
+                // no longer updated below, so take down the last frame now. It stayed over Astra until the game lost
+                // focus (a player saw the Egg Heist map in Astra, 5 Nov).
+                if (!InEggHeist && miniShowing) { Log.Write("left Egg Heist: hiding the on-screen map"); HideMini(); }
                 // Faster while the on-screen map follows the player; tracking is cheap then.
                 // On the island there may be no Sanctum layout yet; it still needs fast updates.
                 // In a run with the layout still unknown too: that is when the run timer, the
