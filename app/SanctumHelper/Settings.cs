@@ -164,6 +164,30 @@ public sealed class Settings
     }
 }
 
+/// <summary>Dev switch rock-log's own file, beside log.txt (which starts over at 2 MB, a few hours of play): one short line
+/// or two per area loaded. Stops growing at 4 MB.</summary>
+public static class Rocks
+{
+    static readonly object Gate = new();
+    public static string FilePath => Path.Combine(Settings.Dir, "rocks.txt");
+
+    public static void Write(string msg)
+    {
+        Log.Write("rocks: " + msg);
+        lock (Gate)
+        {
+            try
+            {
+                Directory.CreateDirectory(Settings.Dir);
+                var fi = new FileInfo(FilePath);
+                if (fi.Exists && fi.Length > 4_000_000) return;
+                File.AppendAllText(FilePath, $"{DateTime.Now:yyyy-MM-dd HH:mm:ss} {msg}{Environment.NewLine}");
+            }
+            catch { /* logging must never crash the app */ }
+        }
+    }
+}
+
 /// <summary>A rectangle in 1920x1080 reference pixels.</summary>
 public sealed record RegionF(double X, double Y, double W, double H);
 

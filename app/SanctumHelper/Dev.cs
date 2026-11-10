@@ -23,7 +23,7 @@ public static class Dev
         ChallengeAsync, SkipRepeat, ArrowRetry, StaleSearch, HostedIo, HanningCache, ResizeSkip, EscNearby, WiderDisc,
         LazyArt, FreeIdle, GrabTime, PictureAge, LogThread,
         RefinerTrim, ConeArcs, IslandShrinkOnce, LangCache, HostedScan, CompactMasks, ConeCheck, FloorRooms, BossRooms, DecodeThread, FasterArrow, RetainedMap,
-        ExitSameDoor, ConeLog;
+        ExitSameDoor, ConeLog, RedrawCap, Facing30, Track20, OneWorker, RockLog;
 
     const string Bench = "Bench tested", Compared = "Compared with the old pictures", Log = "Checked against a real game log", Untested = "Not tested yet";
 
@@ -41,6 +41,16 @@ public static class Dev
             "A few MB after a run, until the next full map.", "None found.", Bench, v => RefinerTrim = v),
         new("cone-arcs", NoRisk, "CPU", "Faster view cone search", "Finds the view cone's brightest arc by sliding along it instead of adding up every arc, and keeps its arrays.",
             "Cone reads 0.10 to 0.06 ms, and 13 KB to 0.6 KB of new memory each.", "None found: all 900 simulated minimaps gave identical answers.", Bench, v => ConeArcs = v),
+        new("rock-log", NoRisk, "Accuracy", "Note the rocks the game names at each arrival", "After each area loads in an Egg Heist run, the game's own log names the rocks and props near the player. This writes those names to rocks.txt next to the helper's log, with the position the helper then settles on. Nothing shown changes and nothing reads it back yet.",
+            "None yet: enough runs of this make a table of which rocks mean which landing or door, so an arrival could be placed from the game's log instead of from the screen.", "None found; a few short lines a run.", Untested, v => RockLog = v),
+        new("redraw-cap", LowRisk, "CPU", "Redraw the Corner map at most 60 times a second", "On a 120 Hz or faster screen the map was redrawn on every screen frame while you move or turn. With this on, every other frame is skipped.",
+            "Unknown; about half the drawing work while moving on a 120 Hz screen. Nothing on a 60 Hz one.", "The map's glide may look less smooth on a fast screen.", Untested, v => RedrawCap = v),
+        new("facing-30", LowRisk, "CPU", "Read facing 30 times a second", "The arrow and view cone are read from the minimap 30 times a second instead of 60, and the picture of the corner is asked for half as often. The map still turns smoothly between reads.",
+            "Unknown; half the corner pictures taken from the game's screen, and half the arrow and cone reads.", "The arrow and cone may trail a fast camera turn by a few degrees more.", Untested, v => Facing30 = v),
+        new("track-20", LowRisk, "CPU", "Fix the position 20 times a second", "The position is worked out from the minimap 20 times a second instead of about 40. The map still glides between fixes.",
+            "Unknown; about half of the tracking's work (it measured about a third of one core).", "The marker may trail a sprint or a sharp turn slightly more.", Untested, v => Track20 = v),
+        new("one-worker", LowRisk, "CPU", "Match pictures on one thread", "Picture matching stays on the helper's own low-priority thread instead of spreading over four cores at once.",
+            "Unknown; no more short bursts on four cores at the same moment as the game.", "Naming a layout from the minimap and finding yourself on the whole island may take longer.", Untested, v => { OneWorker = v; try { OpenCvSharp.Cv2.SetNumThreads(v ? 1 : 4); } catch { /* no OpenCV in this mode */ } }),
         new("cone-log", NoRisk, "Accuracy", "Say how the view cone reads went", "Every 5 s in a run, the log says how many view cone reads were kept or dropped, how sure they were, how often the cone leapt, and how far the drawn cone sits from the latest reading. Nothing shown changes.",
             "Shows whether the view cone is right, and which cone switch helps, from a real run.", "None found; one more log line every 5 s in a run.", Untested, v => ConeLog = v),
         new("island-shrink-once", NoRisk, "CPU", "Island: scale the minimap once", "Two island checks each scaled the same picture: they share one now.",

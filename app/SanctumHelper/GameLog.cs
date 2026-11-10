@@ -50,6 +50,19 @@ public sealed class GameLog
 
     // Areas loaded from a server that isn't a dungeon: going back to one logs no connect (8 Nov: the lobby, after an Egg Heist run,
     // counted as a new run's island, and the run's maps were never let go).
+    // Dev switch rock-log: right after an area loads, the game names the meshes near the player that it couldn't simplify
+    // ("Couldn't create a Convex Mesh from source mesh "SM_Rock_.._CM_<n>"": rocks mostly, some props), and a few more as
+    // the player walks on. Kept for the area the player is in; the engine writes them next to the position it settles on.
+    static readonly Regex Mesh = new("Convex Mesh from source mesh \"([^\"]+)\"", RegexOptions.Compiled);
+    readonly System.Collections.Generic.SortedSet<string> meshes = new(StringComparer.Ordinal);
+    /// <summary>Areas loaded since the helper started (each visit counts).</summary>
+    public int Visit { get; private set; }
+    /// <summary>Goes up with every mesh newly named in this area, and when that last happened.</summary>
+    public int MeshSeq { get; private set; }
+    public DateTime MeshAt { get; private set; }
+    /// <summary>The meshes named so far in this area, in name order.</summary>
+    public string[] Meshes() => [.. meshes];
+
     readonly System.Collections.Generic.HashSet<string> outside = new();
     readonly string path;
     long pos;
@@ -134,6 +147,11 @@ public sealed class GameLog
 
     void Line(string line)
     {
+        if (Dev.RockLog && !catchingUp && line.Contains("Convex Mesh from source mesh") && Mesh.Match(line) is { Success: true } mesh)
+        {
+            if (meshes.Add(mesh.Groups[1].Value)) { MeshSeq++; MeshAt = DateTime.UtcNow; }
+            return;
+        }
         if (line.Contains("connect to worldx-") && Connect.Match(line) is { Success: true } c)
         {
             server = c.Groups[1].Value; // ms (login), line, singleworld, dungeon, ...
@@ -171,6 +189,7 @@ public sealed class GameLog
         }
         if (!line.Contains("createVoxelScene") || Scene.Match(line) is not { Success: true } m) return;
         string id = m.Groups[1].Value;
+        if (id != pendingId) { Visit++; meshes.Clear(); }
         if (server != "dungeon") outside.Add(id);
         if (server != "dungeon" || interlink || outside.Contains(id))
         {
