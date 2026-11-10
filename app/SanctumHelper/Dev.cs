@@ -22,7 +22,8 @@ public static class Dev
         CornerMargin, MarkerCoast,
         ChallengeAsync, SkipRepeat, ArrowRetry, StaleSearch, HostedIo, HanningCache, ResizeSkip, EscNearby, WiderDisc,
         LazyArt, FreeIdle, GrabTime, PictureAge, LogThread,
-        RefinerTrim, ConeArcs, IslandShrinkOnce, LangCache, HostedScan, CompactMasks, ConeCheck, FloorRooms, BossRooms, DecodeThread, FasterArrow, RetainedMap;
+        RefinerTrim, ConeArcs, IslandShrinkOnce, LangCache, HostedScan, CompactMasks, ConeCheck, FloorRooms, BossRooms, DecodeThread, FasterArrow, RetainedMap,
+        ExitSameDoor, ConeLog;
 
     const string Bench = "Bench tested", Compared = "Compared with the old pictures", Log = "Checked against a real game log", Untested = "Not tested yet";
 
@@ -40,6 +41,8 @@ public static class Dev
             "A few MB after a run, until the next full map.", "None found.", Bench, v => RefinerTrim = v),
         new("cone-arcs", NoRisk, "CPU", "Faster view cone search", "Finds the view cone's brightest arc by sliding along it instead of adding up every arc, and keeps its arrays.",
             "Cone reads 0.10 to 0.06 ms, and 13 KB to 0.6 KB of new memory each.", "None found: all 900 simulated minimaps gave identical answers.", Bench, v => ConeArcs = v),
+        new("cone-log", NoRisk, "Accuracy", "Say how the view cone reads went", "Every 5 s in a run, the log says how many view cone reads were kept or dropped, how sure they were, how often the cone leapt, and how far the drawn cone sits from the latest reading. Nothing shown changes.",
+            "Shows whether the view cone is right, and which cone switch helps, from a real run.", "None found; one more log line every 5 s in a run.", Untested, v => ConeLog = v),
         new("island-shrink-once", NoRisk, "CPU", "Island: scale the minimap once", "Two island checks each scaled the same picture: they share one now.",
             "One copy of the minimap less per island read: small at 1080p, more at 4K.", "None found.", Untested, v => IslandShrinkOnce = v),
         new("lang-cache", NoRisk, "CPU", "Game language: remember where it's kept", "The check every 5 s reads the one setting instead of listing all the game's settings first.",
@@ -120,6 +123,8 @@ public static class Dev
             "First draw of a map's see-through or Radar picture 62-137 to 5-21 ms, of the island 140 to 63 ms.", "The map's picture can appear a moment after its marks. Pictures came out identical once loaded; not tried in a game.", Compared, v => DecodeThread = v),
         new("faster-arrow", LowRisk, "CPU", "Faster arrow read", "Works out how well each turn of the arrow fits directly, around where it last was, instead of through frequency transforms. Wider if unsure, as before.",
             "Arrow reads 1.0 to 0.4 ms while it's being followed; the first read 2.9 to 2.3 ms.", "Same answers on all 4,800 simulated minimaps, but no real ones were recorded to try. An arrow that jumps over 2 px between reads could read a step off once.", Bench, v => FasterArrow = v),
+        new("exit-same-door", LowRisk, "Accuracy", "Out by the door you went in by", "Remembers which island door you went into the Sanctum by (orange or blue; your spawn's orange door if that wasn't seen) and looks there first when you come out, then at all ten doors, not only the five blue ones. Going in by a blue door, the Sanctum map starts at its blue door too.",
+            "Every exit in one player's logs (8 of 8) came out of the orange door they went in by and was placed at a blue door of another spawn, so the island map was wrong after each exit.", "If you leave by a different door than you came in by, it looks at all doors about a second later, as before. Not tried in a game.", Log, v => ExitSameDoor = v),
 
         new("grab-time", HighRisk, "Smoothness", "Time movement from when the picture was taken", "Your speed is worked out from when each picture was taken, not when its read finished.",
             "Steadier speed; size unknown.", "Changes how the marker feels.", Untested, v => GrabTime = v),

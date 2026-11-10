@@ -656,7 +656,9 @@ public sealed class Engine : IDisposable
         // facing when the arrow is gone (smoothed more: a soft wedge is noisier than the arrow).
         // 0.2: on a recorded camera spin, good readings scored 0.22-0.30 when the cone lay over walls;
         // a 0.3 cut-off dropped ~40% of them and the cone froze, then leapt (31 big swings -> 2).
-        if (HeadingDetector.FromViewCone(mm, ui, out double coneConf) is double ch && coneConf >= 0.2)
+        var coneRead = HeadingDetector.FromViewCone(mm, ui, out double coneConf);
+        if (Dev.ConeLog) ConeNote(coneRead, coneConf, now, h != null);
+        if (coneRead is double ch && coneConf >= 0.2)
         {
             // Adaptive smoothing (one-euro filter): steady while the camera holds still, no lag while it turns.
             camera = (now - cameraTime).TotalSeconds < 1 ? cameraFilter.Next(ch, now) : cameraFilter.Reset(ch, now);
@@ -691,6 +693,40 @@ public sealed class Engine : IDisposable
     }
 
     DateTime arrowRetry, lastArrowSeen, cameraTime;
+
+    // Dev switch cone-log: the view cone's reads over 5 s, in a run.
+    int coneReads, coneKept, coneNone, coneLeaps, coneArrow;
+    double coneConfSum, coneConfMin = 1, coneOffSum, coneOffMax;
+    double? coneLast;
+    DateTime coneSince, coneKeptAt;
+
+    static double AngleOff(double a, double b) { double d = Math.Abs(a - b) % 360; return d > 180 ? 360 - d : d; }
+
+    void ConeNote(double? read, double conf, DateTime now, bool arrow)
+    {
+        if (coneSince == default) coneSince = now;
+        coneReads++;
+        if (arrow) coneArrow++;
+        if (read is not double r) coneNone++;
+        else if (conf < 0.2) coneConfMin = Math.Min(coneConfMin, conf);
+        else
+        {
+            coneKept++; coneConfSum += conf; coneConfMin = Math.Min(coneConfMin, conf);
+            // a leap: over 45 degrees from the last kept read within a tenth of a second (a camera can't turn that fast)
+            if (coneLast is double l && (now - coneKeptAt).TotalSeconds < 0.1 && AngleOff(r, l) > 45) coneLeaps++;
+            coneLast = r; coneKeptAt = now;
+            // how far the drawn (filtered) cone sits from this read
+            if (camera is double c) { double off = AngleOff(c, r); coneOffSum += off; coneOffMax = Math.Max(coneOffMax, off); }
+        }
+        if ((now - coneSince).TotalSeconds < 5) return;
+        if (InRun || onIsland)
+            Log.Write($"cone: {coneReads} reads, {coneKept} kept (sure {(coneKept > 0 ? coneConfSum / coneKept : 0):0.00} avg, {coneConfMin:0.00} lowest), " +
+                      $"{coneReads - coneKept - coneNone} too faint, {coneNone} not found, {coneLeaps} leaps, " +
+                      $"drawn cone {(coneKept > 0 ? coneOffSum / coneKept : 0):0.0} deg off avg, {coneOffMax:0} max | arrow seen in {coneArrow}");
+        coneReads = coneKept = coneNone = coneLeaps = coneArrow = 0;
+        coneConfSum = coneOffSum = coneOffMax = 0; coneConfMin = 1;
+        coneSince = now;
+    }
     readonly AngleFilter cameraFilter = new();
     readonly HeadingSmoother headingSmoother = new();
     int eggVotes;
@@ -970,7 +1006,7 @@ public sealed class Engine : IDisposable
             lastPose = null; player = null;
             minimap.Reset();
             // Just loaded: at the orange door, where every run enters. Later (Sanctum Helper started mid-run): the whole map is searched.
-            if ((DateTime.UtcNow - gameLog.SanctumNamedAt).TotalSeconds < 15) minimap.Seed(new Point2d(told.Orange.Img[0], told.Orange.Img[1]));
+            if ((DateTime.UtcNow - gameLog.SanctumNamedAt).TotalSeconds < 15) minimap.Seed(SanctumEntry(told));
             layout = told;
         }
         // A chest, shop or other screen covering the HUD (timer match ~0.27 under it, vs 0.65+
@@ -1082,23 +1118,40 @@ public sealed class Engine : IDisposable
             if (Dev.ArrivalSlow && !slowTick) return;   // (a look at every landing spot: ~20 a second is plenty)
             Point2d? best = null;
             double bestScore = 0;
-            foreach (var m in isl.Markers.Where(m => m.Kind == islandArrival))
+            string? bestKind = null;
+            var scores = "";
+            // Dev switch exit-same-door: out of a Sanctum, the door you went in by first (about a second), then all ten
+            // doors, orange and blue: the five blue ones alone placed every exit at another spawn's door (10 Nov logs).
+            var expectedDoor = Dev.ExitSameDoor && islandArrival == "entrance_side" ? ExpectedExitDoor(isl) : null;
+            IEnumerable<Marker> spots = isl.Markers.Where(m => m.Kind == islandArrival);
+            if (Dev.ExitSameDoor && islandArrival == "entrance_side")
+                spots = expectedDoor is Point2d ed && islandArrivalTries < 20
+                    ? isl.Markers.Where(m => m.Kind is "entrance_main" or "entrance_side" && Math.Abs(m.Img[0] - ed.X) + Math.Abs(m.Img[1] - ed.Y) < 1)
+                    : isl.Markers.Where(m => m.Kind is "entrance_main" or "entrance_side");
+            foreach (var m in spots)
             {
                 islandTracker.Reset();
                 var spot = new Point2d(m.Img[0], m.Img[1]);
                 islandTracker.Seed(spot);
-                if (islandTracker.Locate(mm, isl, ui, false) is Point2d && islandTracker.LastScore > bestScore)
+                var found = islandTracker.Locate(mm, isl, ui, false) is Point2d;
+                if (Dev.ExitSameDoor && islandArrival == "entrance_side") scores += $"{(scores.Length > 0 ? ", " : "")}{DoorName(m.Kind)} ({m.Img[0]:0},{m.Img[1]:0}) {(found ? islandTracker.LastScore.ToString("0.00") : "-")}";
+                if (found && islandTracker.LastScore > bestScore)
                 {
                     // The player stands at the portal / landing itself: start there, not at the
                     // (weaker, possibly off) match that picked it.
                     best = spot;
                     bestScore = islandTracker.LastScore;
+                    bestKind = m.Kind;
                 }
             }
             islandTracker.Reset();
             if (best is Point2d at)
             {
                 islandTracker.Seed(at);
+                if (islandArrival == "boat") { islandSpawn = at; islandDoor = null; islandDoorKind = null; }
+                if (Dev.ExitSameDoor && islandArrival != "boat")
+                    Log.Write($"island: found at the {DoorName(bestKind)} exit ({bestScore:0.00}){(bestKind != null && expectedDoor is Point2d ex && Math.Abs(ex.X - at.X) + Math.Abs(ex.Y - at.Y) < 1 ? ", the door you went in by" : "")}{(scores.Length > 0 ? " | " + scores : "")}");
+                else
                 Log.Write($"island: found at the {(islandArrival == "boat" ? "boat landing" : "blue-door exit")} ({bestScore:0.00})");
                 islandArrival = null;
                 islandProbation = 0;
@@ -1270,6 +1323,7 @@ public sealed class Engine : IDisposable
         switch (where)
         {
             case GameLog.Place.Sanctum when onIsland:
+                if (Dev.ExitSameDoor) RememberEntryDoor();
                 // Into the Sanctum: drop the island map at once instead of after a few minimaps.
                 onIsland = false;
                 islandTracker.Reset();
@@ -1292,6 +1346,51 @@ public sealed class Engine : IDisposable
     long lastMinimapLog = -10000, lastSlowTick = -10000;
     DateTime? misfitSince;
     string? islandArrival;
+    /// <summary>Dev switch exit-same-door: this run's boat landing, and the island door last gone into a Sanctum by
+    /// (entrance_main: orange, entrance_side: blue).</summary>
+    Point2d? islandSpawn, islandDoor;
+    string? islandDoorKind;
+
+    static string DoorName(string? kind) => kind == "entrance_main" ? "orange-door" : kind == "entrance_side" ? "blue-door" : "door";
+
+    /// <summary>Going into a Sanctum from the island: the nearest island door to the last position (within 300 px, about
+    /// 75 m), or none.</summary>
+    void RememberEntryDoor()
+    {
+        if (db.Island is not Layout isl || islandPlayer is not Point2d p || (DateTime.UtcNow - islandTime).TotalSeconds > 30) return;
+        var door = isl.Markers.Where(m => m.Kind is "entrance_main" or "entrance_side")
+            .OrderBy(m => Math.Abs(m.Img[0] - p.X) + Math.Abs(m.Img[1] - p.Y)).FirstOrDefault();
+        if (door == null || Math.Abs(door.Img[0] - p.X) + Math.Abs(door.Img[1] - p.Y) > 300)
+        {
+            islandDoor = null; islandDoorKind = null;
+            Log.Write($"island: went into the Sanctum away from any door ({p.X:0},{p.Y:0})");
+            return;
+        }
+        islandDoor = new Point2d(door.Img[0], door.Img[1]);
+        islandDoorKind = door.Kind;
+        Log.Write($"island: went into the Sanctum by the {DoorName(door.Kind)} at ({door.Img[0]:0},{door.Img[1]:0})");
+        // A layout already known (going back in): start at that door's side of the Sanctum.
+        if (CurrentLayout is Layout l && !l.IsIsland) minimap.Seed(SanctumEntry(l));
+    }
+
+    /// <summary>Where an exit should come out: the door gone in by, else this run's spawn's orange door (the nearest
+    /// orange door to its boat landing: about 230-295 px, every other one 600+).</summary>
+    Point2d? ExpectedExitDoor(Layout isl)
+    {
+        if (islandDoor is Point2d d) return d;
+        if (islandSpawn is not Point2d s) return null;
+        var main = isl.Markers.Where(m => m.Kind == "entrance_main")
+            .OrderBy(m => Math.Abs(m.Img[0] - s.X) + Math.Abs(m.Img[1] - s.Y)).FirstOrDefault();
+        return main == null ? null : new Point2d(main.Img[0], main.Img[1]);
+    }
+
+    /// <summary>Where the Sanctum map starts: its orange door, where runs enter; its blue door when the island's blue
+    /// door was gone in by (exit-same-door).</summary>
+    Point2d SanctumEntry(Layout l)
+    {
+        var room = Dev.ExitSameDoor && islandDoorKind == "entrance_side" && l.Rooms.Any(r => r.Kind == "blue") ? l.Blue : l.Orange;
+        return new Point2d(room.Img[0], room.Img[1]);
+    }
     int islandArrivalTries;
     Mat? portalIcon;
     Point2d lastLandmark;
