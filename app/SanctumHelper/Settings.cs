@@ -31,7 +31,7 @@ public sealed class Settings
     /// <summary>Read the game's own log (Player.log) to know at once whether the player is on the
     /// island or in the Sanctum, and when a new run starts. The minimap is the fallback.</summary>
     public bool UseGameLog { get; set; } = true;
-    /// <summary>Small notices in the top-right corner ("Hard Mode found.", "Sanctum found #32").</summary>
+    /// <summary>Small notices in the top-right corner ("Hard Mode chosen.", "Sanctum found #32").</summary>
     public bool ShowNotifications { get; set; } = true;
     /// <summary>A controller button that works like the overlay key (XInput bit, 0 = none).</summary>
     public int HoldButton { get; set; }
