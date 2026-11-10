@@ -132,6 +132,7 @@ public sealed class OverlayWindow : Window
         bool sameLook = (Dev.RedrawSkip || (Dev.RetainedMap && view.RetainedLive)) && before != null && f is { Mini: true, Visible: true, Player: not null } && before.Player != null && egg == lastEgg && nowMs - lastRedraw < 250
             && before with { Player = f.Player, PlayerFresh = f.PlayerFresh, Heading = f.Heading, Velocity = f.Velocity, Stamp = f.Stamp, Camera = f.Camera } == f;
         lastEgg = egg;
+        Tally.Add(sameLook ? Tally.N.FrameNoDraw : Tally.N.Frame);
         if (sameLook) return;
         lastRedraw = nowMs;
         view.InvalidateVisual();
@@ -403,16 +404,22 @@ public sealed class OverlayView : FrameworkElement
     }
     DateTime lastTick = DateTime.UtcNow;
 
-    TimeSpan lastRenderTime;
+    TimeSpan lastRenderTime, countedRenderTime;
     int shownLayout;
 
     void Animate(object? sender, EventArgs e)
     {
         // WPF can raise this more than once for a display frame: nothing new to show the second time.
+        // (Dev switch dev-stats: how many display ticks came, and how many of them a second time for the same frame.)
+        if (Dev.Stats && e is RenderingEventArgs counted)
+        {
+            Tally.Add(counted.RenderingTime == countedRenderTime ? Tally.N.TickTwice : Tally.N.Tick);
+            countedRenderTime = counted.RenderingTime;
+        }
         if (Dev.DuplicateTick && e is RenderingEventArgs re) { if (re.RenderingTime == lastRenderTime) return; lastRenderTime = re.RenderingTime; }
         var now = DateTime.UtcNow;
         // Dev switch redraw-cap: on a 120 Hz or faster screen, every other frame is left as it is (at most ~60-80 steps a second).
-        if (Dev.RedrawCap && (now - lastTick).TotalMilliseconds < 12) return;
+        if (Dev.RedrawCap && (now - lastTick).TotalMilliseconds < 12) { Tally.Add(Tally.N.TickCapped); return; }
         double dt = Math.Min(0.1, (now - lastTick).TotalSeconds);
         lastTick = now;
         if (Frame is not { Mini: true, Visible: true, Player: OpenCvSharp.Point2d fix } fr) { shown = null; shownHeading = shownCamera = null; return; }

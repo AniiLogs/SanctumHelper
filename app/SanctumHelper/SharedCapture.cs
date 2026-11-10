@@ -220,8 +220,11 @@ public static class SharedCapture
 
     /// <summary>The part `sub` (client coordinates) of the shared picture as BGR, or null when there
     /// is no fresh picture of this window at this size holding that part.</summary>
-    public static Mat? TryGrab(IntPtr hwnd, int clientW, int clientH, Rect sub)
+    /// <param name="unlessSame">Dev switch skip-repeat: when the picture is the very one this thread copied this same part from last
+    /// time, nothing is copied: null comes back with SameAsLast set. Everything else (the request, every check) runs as always.</param>
+    public static Mat? TryGrab(IntPtr hwnd, int clientW, int clientH, Rect sub, bool unlessSame = false)
     {
+        SameAsLast = false;
         if (!Enabled) return null;
         lock (gate)
         {
@@ -255,6 +258,16 @@ public static class SharedCapture
                 int offset = (int)U32(at + 32), stride = (int)U32(at + 36);
                 var pic = new Rect(U16(at + 40), U16(at + 42), U16(at + 44), U16(at + 46));
                 if (pic.Intersect(sub) != sub) return null;                // a picture of an older, smaller box
+                if (unlessSame && LastPicture == (at, seq) && lastSub == sub)
+                {
+                    // The caller still holds its copy of exactly this: the same slot, not written since (a slot written again
+                    // gets a new number), and the same part of it. Counts as a use like any other, without the copy.
+                    if (Seq(at + 16) != seq) continue;
+                    LastAgeMs = now - I64(at + 24);
+                    lastUsed = Environment.TickCount64;
+                    SameAsLast = true;
+                    return null;
+                }
                 var src = basePtr + Header + offset + (sub.Y - pic.Y) * stride + (sub.X - pic.X) * 4;
                 using var bgra = Mat.FromPixelData(sub.Height, sub.Width, MatType.CV_8UC4, src, stride);
                 var bgr = new Mat();
@@ -262,6 +275,7 @@ public static class SharedCapture
                 if (Seq(at + 16) == seq)
                 {
                     LastPicture = (at, seq);
+                    lastSub = sub;
                     LastAgeMs = now - I64(at + 24);
                     ScreenCopy = (flags & 2) != 0;
                     CopyMs = U32(at + 52) / 1000.0;
@@ -277,6 +291,10 @@ public static class SharedCapture
 
     /// <summary>Which picture this thread's last copy came from: the same again means nothing's new (Dev.SkipRepeat).</summary>
     [ThreadStatic] public static (int at, long seq) LastPicture;
+    /// <summary>The part of it that copy was (client px), and whether the last call found that same picture and part again and so
+    /// copied nothing (only when asked to: Dev.SkipRepeat).</summary>
+    [ThreadStatic] static Rect lastSub;
+    [ThreadStatic] public static bool SameAsLast;
     /// <summary>How old this thread's last copy was when taken, in ms (Dev.PictureAge).</summary>
     [ThreadStatic] public static long LastAgeMs;
 
