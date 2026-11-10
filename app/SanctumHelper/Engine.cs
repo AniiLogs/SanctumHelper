@@ -283,7 +283,7 @@ public sealed class Engine : IDisposable
         {
             Log.Write($"difficulty: {l.Difficulties[0]} (from {l.Title}; was {DetectedDifficulty ?? "unknown"})");
             DetectedDifficulty = l.Difficulties[0];
-            Notify?.Invoke(Lang.F("{0} Mode found.", Lang.Difficulty(l.Difficulties[0])), l.Difficulties[0]);
+            Notify?.Invoke(Lang.F("{0} Mode chosen.", Lang.Difficulty(l.Difficulties[0])), l.Difficulties[0]);
         }
         settings.RunLayout = l.Number;
         settings.RunLayoutTime = DateTime.UtcNow;
@@ -876,15 +876,29 @@ public sealed class Engine : IDisposable
         // Being on the party screen means any previous run is over.
         if (CurrentLayout != null && settings.ForcedLayout == 0) ResetRun();
         difficultyDoubted = false;
-        if (d != DetectedDifficulty)
+        // The notice says the difficulty each time the party screen comes up (owner, 10 Nov: it showed only when the
+        // difficulty changed, so a second Normal run said nothing), and again whenever it changes there; not on every
+        // read while the screen stays up. Gone for more than PartyAwaySeconds counts as leaving it.
+        var seen = DateTime.UtcNow;
+        bool cameBack = NewPartyVisit(partySeen, seen);
+        partySeen = seen;
+        if (d != DetectedDifficulty || cameBack)
         {
+            if (d != DetectedDifficulty) Log.Write($"difficulty: {d} (\"{difficulty.LastText}\")");
+            else Log.Write($"party screen again: {d}");
             DetectedDifficulty = d;
-            Log.Write($"difficulty: {d} (\"{difficulty.LastText}\")");
-            Notify?.Invoke(Lang.F("{0} Mode found.", Lang.Difficulty(d)), d);
+            Notify?.Invoke(Lang.F("{0} Mode chosen.", Lang.Difficulty(d)), d);
             StatusChanged?.Invoke();
         }
         return true;
     }
+
+    /// <summary>When the party screen's difficulty was last read (UTC).</summary>
+    DateTime partySeen = DateTime.MinValue;
+    /// <summary>Longer than this without a party screen read and its next read is a new visit. Reads come every 0.5 s
+    /// while it's up and every 1-1.5 s otherwise, so one missed read doesn't count as leaving.</summary>
+    internal const double PartyAwaySeconds = 3.0;
+    internal static bool NewPartyVisit(DateTime lastSeen, DateTime now) => (now - lastSeen).TotalSeconds > PartyAwaySeconds;
 
     /// <summary>The map screen's title corner (client px): 400x200 at 1080p, scaled with the game's UI and at the
     /// left of its UI area.</summary>

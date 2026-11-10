@@ -5,7 +5,7 @@ using System.Windows.Media;
 
 namespace SanctumHelper;
 
-/// <summary>Hands this app's notices ("Chaos Mode found.") to the aLogs DPS meter, which shows every module's notices
+/// <summary>Hands this app's notices ("Chaos Mode chosen.") to the aLogs DPS meter, which shows every module's notices
 /// in one style, in the spot and with the motion the player picked (General Settings › Notifications), one after
 /// another instead of two cards on top of each other. Only while the meter's overlay runs (its status.json says
 /// "notices": true and was written in the last few seconds); otherwise this app shows its own (ToastWindow).
