@@ -23,7 +23,7 @@ public static class Dev
         ChallengeAsync, SkipRepeat, ArrowRetry, StaleSearch, HostedIo, HanningCache, ResizeSkip, EscNearby, WiderDisc,
         LazyArt, FreeIdle, GrabTime, PictureAge, LogThread,
         RefinerTrim, ConeArcs, IslandShrinkOnce, LangCache, HostedScan, CompactMasks, ConeCheck, FloorRooms, BossRooms, DecodeThread, FasterArrow, RetainedMap,
-        ExitSameDoor;
+        ExitSameDoor, ConeLog;
 
     const string Bench = "Bench tested", Compared = "Compared with the old pictures", Log = "Checked against a real game log", Untested = "Not tested yet";
 
@@ -41,6 +41,8 @@ public static class Dev
             "A few MB after a run, until the next full map.", "None found.", Bench, v => RefinerTrim = v),
         new("cone-arcs", NoRisk, "CPU", "Faster view cone search", "Finds the view cone's brightest arc by sliding along it instead of adding up every arc, and keeps its arrays.",
             "Cone reads 0.10 to 0.06 ms, and 13 KB to 0.6 KB of new memory each.", "None found: all 900 simulated minimaps gave identical answers.", Bench, v => ConeArcs = v),
+        new("cone-log", NoRisk, "Accuracy", "Say how the view cone reads went", "Every 5 s in a run, the log says how many view cone reads were kept or dropped, how sure they were, how often the cone leapt, and how far the drawn cone sits from the latest reading. Nothing shown changes.",
+            "Shows whether the view cone is right, and which cone switch helps, from a real run.", "None found; one more log line every 5 s in a run.", Untested, v => ConeLog = v),
         new("island-shrink-once", NoRisk, "CPU", "Island: scale the minimap once", "Two island checks each scaled the same picture: they share one now.",
             "One copy of the minimap less per island read: small at 1080p, more at 4K.", "None found.", Untested, v => IslandShrinkOnce = v),
         new("lang-cache", NoRisk, "CPU", "Game language: remember where it's kept", "The check every 5 s reads the one setting instead of listing all the game's settings first.",

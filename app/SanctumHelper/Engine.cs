@@ -656,7 +656,9 @@ public sealed class Engine : IDisposable
         // facing when the arrow is gone (smoothed more: a soft wedge is noisier than the arrow).
         // 0.2: on a recorded camera spin, good readings scored 0.22-0.30 when the cone lay over walls;
         // a 0.3 cut-off dropped ~40% of them and the cone froze, then leapt (31 big swings -> 2).
-        if (HeadingDetector.FromViewCone(mm, ui, out double coneConf) is double ch && coneConf >= 0.2)
+        var coneRead = HeadingDetector.FromViewCone(mm, ui, out double coneConf);
+        if (Dev.ConeLog) ConeNote(coneRead, coneConf, now, h != null);
+        if (coneRead is double ch && coneConf >= 0.2)
         {
             // Adaptive smoothing (one-euro filter): steady while the camera holds still, no lag while it turns.
             camera = (now - cameraTime).TotalSeconds < 1 ? cameraFilter.Next(ch, now) : cameraFilter.Reset(ch, now);
@@ -691,6 +693,40 @@ public sealed class Engine : IDisposable
     }
 
     DateTime arrowRetry, lastArrowSeen, cameraTime;
+
+    // Dev switch cone-log: the view cone's reads over 5 s, in a run.
+    int coneReads, coneKept, coneNone, coneLeaps, coneArrow;
+    double coneConfSum, coneConfMin = 1, coneOffSum, coneOffMax;
+    double? coneLast;
+    DateTime coneSince, coneKeptAt;
+
+    static double AngleOff(double a, double b) { double d = Math.Abs(a - b) % 360; return d > 180 ? 360 - d : d; }
+
+    void ConeNote(double? read, double conf, DateTime now, bool arrow)
+    {
+        if (coneSince == default) coneSince = now;
+        coneReads++;
+        if (arrow) coneArrow++;
+        if (read is not double r) coneNone++;
+        else if (conf < 0.2) coneConfMin = Math.Min(coneConfMin, conf);
+        else
+        {
+            coneKept++; coneConfSum += conf; coneConfMin = Math.Min(coneConfMin, conf);
+            // a leap: over 45 degrees from the last kept read within a tenth of a second (a camera can't turn that fast)
+            if (coneLast is double l && (now - coneKeptAt).TotalSeconds < 0.1 && AngleOff(r, l) > 45) coneLeaps++;
+            coneLast = r; coneKeptAt = now;
+            // how far the drawn (filtered) cone sits from this read
+            if (camera is double c) { double off = AngleOff(c, r); coneOffSum += off; coneOffMax = Math.Max(coneOffMax, off); }
+        }
+        if ((now - coneSince).TotalSeconds < 5) return;
+        if (InRun || onIsland)
+            Log.Write($"cone: {coneReads} reads, {coneKept} kept (sure {(coneKept > 0 ? coneConfSum / coneKept : 0):0.00} avg, {coneConfMin:0.00} lowest), " +
+                      $"{coneReads - coneKept - coneNone} too faint, {coneNone} not found, {coneLeaps} leaps, " +
+                      $"drawn cone {(coneKept > 0 ? coneOffSum / coneKept : 0):0.0} deg off avg, {coneOffMax:0} max | arrow seen in {coneArrow}");
+        coneReads = coneKept = coneNone = coneLeaps = coneArrow = 0;
+        coneConfSum = coneOffSum = coneOffMax = 0; coneConfMin = 1;
+        coneSince = now;
+    }
     readonly AngleFilter cameraFilter = new();
     readonly HeadingSmoother headingSmoother = new();
     int eggVotes;
