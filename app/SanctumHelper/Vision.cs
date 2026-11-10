@@ -607,7 +607,11 @@ public sealed class MinimapTracker(MapArtCache arts)
     public void Reset() { scale = null; last = null; LastScore = 0; vel = default; Floor = 0; }
 
     /// <summary>Lets go of the cached floors of every layout but the ones kept (all of them when none is).</summary>
-    public void Release(Func<int, bool>? keep = null) => Later.Dispose(Later.Take(artFloor, k => keep?.Invoke(k.Item1) ?? false));
+    public void Release(Func<int, bool>? keep = null)
+    {
+        Later.Dispose(Later.Take(artFloor, k => keep?.Invoke(k.Item1) ?? false));
+        DropWindows();
+    }
 
     // Motion filter (constant velocity, alpha-beta): follows without the lag of plain smoothing,
     // carries through a missed fix, and refuses implausible jumps. Units: map-art px and px/s.
@@ -651,11 +655,69 @@ public sealed class MinimapTracker(MapArtCache arts)
         return small;
     });
 
+    /// <summary>The engine's own tracker, the one that follows the player through a run (the others only try layouts out for a
+    /// moment): the one Dev switch art-window keeps windows for, and the one Dev switch dev-stats counts.</summary>
+    public bool Main { get; init; }
+
+    // ---- Dev switch art-window: the map's side of a match is two transforms of the window looked at, and that window only moves
+    // when the player has moved a whole pixel of it. While it is the same window of the same map as at the last fix, they are kept.
+    // (The maps are made once and never drawn on: the same Mat is the same picture. Only the engine's thread matches; the lock
+    // is for the maps being let go of from another thread meanwhile.)
+    readonly Dictionary<(int floor, bool near), (Mat map, Rect roi, MatchImage image)> windows = new();
+    // Kept only for the windows of a player being followed (about 350 px across, 1 MB kept): a search over a whole map would
+    // keep tens of MB for one use.
+    const int KeptWindowPx = 600 * 600;
+
+    /// <summary>match.Match(the part `roi` of `map`, res). With the switch on, that part's transforms are the ones kept from the
+    /// last fix when it is the same part of the same picture: the same numbers go in, so the same numbers come out.</summary>
+    void MatchWindow(MaskedTemplate match, Mat map, Rect roi, int floor, bool near, Mat res)
+    {
+        if (!Dev.ArtWindow || !Main || MaskedTemplate.Reference || roi.Width * roi.Height > KeptWindowPx)
+        {
+            using var sub = new Mat(map, roi);
+            match.Match(sub, res);
+            return;
+        }
+        Tally.Add(Tally.N.Window);
+        lock (windows)
+        {
+            if (windows.TryGetValue((floor, near), out var w) && ReferenceEquals(w.map, map) && w.roi == roi) Tally.Add(Tally.N.WindowKept);
+            else
+            {
+                if (w.image != null) { windows.Remove((floor, near)); w.image.Dispose(); }
+                using var sub = new Mat(map, roi);
+                windows[(floor, near)] = w = (map, roi, new MatchImage(sub));
+            }
+            match.Match(w.image, res);
+        }
+    }
+
+    /// <summary>What Dev switch art-window kept goes (the maps were let go of, or the switch was turned off again). Nothing to do
+    /// when it never kept anything.</summary>
+    void DropWindows()
+    {
+        lock (windows)
+        {
+            foreach (var w in windows.Values) w.image.Dispose();
+            windows.Clear();
+        }
+    }
+
     /// <summary>minimapBgr is the square crop centered on the player arrow; uiScale is the
     /// client height / 1080. Returns the player's position in map-art pixels.</summary>
     public Point2d? Locate(Mat minimapBgr, Layout layout, double uiScale, DateTime? pictureAt = null)
     {
         if (minimapBgr.Width < 40) return null;
+        // (Dev switch art-window turned off again: what it kept goes.)
+        if (!Dev.ArtWindow && windows.Count > 0) DropWindows();
+        if (Main) Tally.Add(Tally.N.Fix);
+        var found = Fix(minimapBgr, layout, uiScale, pictureAt);
+        if (Main && found == null) Tally.Add(Tally.N.FixNone);
+        return found;
+    }
+
+    Point2d? Fix(Mat minimapBgr, Layout layout, double uiScale, DateTime? pictureAt)
+    {
         bool tracking = last != null;
         double Work = tracking && scale != null ? TrackWork : SearchWork;
         using var small = new Mat();
@@ -774,13 +836,13 @@ public sealed class MinimapTracker(MapArtCache arts)
                     2 * near + tpl.Width, 2 * near + tpl.Height).Intersect(roi);
                 if (close.Width > tpl.Width + 2 && close.Height > tpl.Height + 2)
                 {
-                    using var nearby = new Mat(map, close);
-                    match.Match(nearby, res);
+                    MatchWindow(match, map, close, fl, true, res);
                     Cv2.PatchNaNs(res, -1);
                     Cv2.Threshold(res, res, 1.0, 0, ThresholdTypes.TozeroInv);
                     Cv2.Max(res, new Scalar(-1), res);
                     Cv2.MinMaxLoc(res, out _, out max, out _, out loc);
                     settled = otherHere || (max >= NearScore && loc.X > 0 && loc.Y > 0 && loc.X < res.Width - 1 && loc.Y < res.Height - 1);
+                    if (Main && !otherHere) Tally.Add(settled ? Tally.N.NearHit : Tally.N.NearMiss);
                     if (settled) roi = close;
                 }
             }
@@ -795,8 +857,7 @@ public sealed class MinimapTracker(MapArtCache arts)
             if (!settled)
             {
                 if (roi.Width <= tpl.Width || roi.Height <= tpl.Height) continue;
-                using var sub = new Mat(map, roi);
-                match.Match(sub, res);
+                MatchWindow(match, map, roi, fl, false, res);
                 // Flat windows divide by ~0 and give NaN/±Inf: treat them as no match.
                 Cv2.PatchNaNs(res, -1);
                 Cv2.Threshold(res, res, 1.0, 0, ThresholdTypes.TozeroInv);
@@ -864,6 +925,7 @@ public sealed class MinimapTracker(MapArtCache arts)
                 // instead of freezing, slowing down so a real stop doesn't overshoot far.
                 vel = new Point2d(vel.X * 0.7, vel.Y * 0.7);
                 last = pred;
+                if (Main) Tally.Add(Tally.N.FixCoast);
                 return pred;
             }
             // Lost (menu, loading screen, teleport). Keep the last spot for a while: menus and the
@@ -883,8 +945,9 @@ public sealed class MinimapTracker(MapArtCache arts)
             bool agrees = jumpCandidate is Point2d jc && Math.Abs(jc.X - b.p.X) + Math.Abs(jc.Y - b.p.Y) < 40;
             if (!agrees) jumpSince = now;
             jumpCandidate = b.p;
-            if (!agrees || (now - jumpSince).TotalSeconds < 0.03) { LastInfo += " (jump, waiting for confirmation)"; return pred; }
+            if (!agrees || (now - jumpSince).TotalSeconds < 0.03) { LastInfo += " (jump, waiting for confirmation)"; if (Main) Tally.Add(Tally.N.FixJump); return pred; }
             vel = default; last = b.p; // confirmed (dash, teleport): snap
+            if (Main) Tally.Add(Tally.N.FixJumpTaken);
         }
         else if (!tracking || !recent)
         {
@@ -902,6 +965,7 @@ public sealed class MinimapTracker(MapArtCache arts)
         jumpCandidate = null;
         lastOk = filterTime = now;
         scale = b.s;
+        if (Main && Floor != b.fl) Tally.Add(Tally.N.FixFloor);
         Floor = b.fl;
         return last;
     }

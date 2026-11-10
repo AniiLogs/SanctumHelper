@@ -205,7 +205,7 @@ public sealed class Engine : IDisposable
         string icons = System.IO.Path.Combine(db.Root, "icons");
         doors = new DoorLocator(arts, Cv2.ImRead(System.IO.Path.Combine(icons, "map_header.png")),
             Cv2.ImRead(System.IO.Path.Combine(icons, "screen_door_orange.png")), Cv2.ImRead(System.IO.Path.Combine(icons, "screen_door_blue.png")));
-        minimap = new MinimapTracker(arts);
+        minimap = new MinimapTracker(arts) { Main = true };
         hook.StateChanged += down => { if (down && settings.ToggleMode) toggled = !toggled; };
         if (!ocr.Available) Log.Write("Windows OCR is not available: difficulty must be set by hand");
         // The game's log says where the player is (island, Sanctum, elsewhere) and when a run
@@ -301,7 +301,7 @@ public sealed class Engine : IDisposable
     void Loop()
     {
         var sw = clock;
-        long nextWindow = 0, nextOcr = 0, nextMinimap = 0, nextGameLog = 0, nextLangCheck = 5000, nextPerfLog = 10000;
+        long nextWindow = 0, nextOcr = 0, nextMinimap = 0, nextGameLog = 0, nextLangCheck = 5000, nextPerfLog = 10000, nextStats = 60000;
         bool wasShowing = false;
         while (running)
         {
@@ -391,6 +391,12 @@ public sealed class Engine : IDisposable
                         + $" · run timer {lastTimerScore:0.00}{(InRun ? " (in a run)" : "")}"
                         + $" · dev on: {(Dev.On() is { Length: > 0 } devOn ? string.Join(",", devOn) : "none")}");
                 }
+                // Dev switch dev-stats: once a minute, what the readers did in it (nothing in a minute when nothing was read).
+                if (Dev.Stats && now >= nextStats)
+                {
+                    nextStats = now + 60000;
+                    if (Tally.Report() is string stats) Log.Write(stats);
+                }
                 if (settings.UseGameLog && now >= nextGameLog)
                 {
                     nextGameLog = now + 250;
@@ -448,17 +454,21 @@ public sealed class Engine : IDisposable
                         }
                     if (mapOpen)
                     {
+                        long tMap = Tally.Start;
                         using var frame = Grab(new Rect(0, 0, c0.Width, c0.Height));
                         if (noPicture) { wasShowing = true; Thread.Sleep(10); continue; }
                         minimap.HoldStill();
                         ShowMap(frame);
+                        Tally.Time(Tally.N.MapOpen, tMap);
                     }
                     else if (!bigOk) ShowMap(null);
                     else
                     {
                         // A fix per new corner copy (the same picture twice gives the same fix).
+                        long tBig = Tally.Start;
                         if (Dev.Track20 ? now - lastBigFix >= 50 : NewCorner || now - lastBigFix >= 40) { lastBigFix = now; TrackMinimap(); }
                         ShowBig();
+                        Tally.Time(Tally.N.BigMap, tBig);
                     }
                     wasShowing = true;
                     // Next frame ~16 ms after this one started (was a flat 15 ms after it ended).
@@ -568,23 +578,30 @@ public sealed class Engine : IDisposable
                 // copy here ~60 times a second made the desktop finish composing each time and the game stutter.
                 var corner = CornerRect(rc, c);
                 long grabbed = Environment.TickCount64;
-                var top = SharedCapture.AppPresent ? SharedCapture.TryGrab(game.Handle, c.Width, c.Height, corner) : ScreenPart(corner);
-                if (top == null) { Thread.Sleep(4); continue; }   // no fresh shared frame yet
-                if (SharedCapture.AppPresent && Dev.SkipRepeat && SharedCapture.LastPicture == headingPicture && HasSharedCorner(top))
+                // (Dev switch skip-repeat: the picture whose copy is still held here is told apart before it is copied a second time.)
+                bool held = Dev.SkipRepeat && SharedCapture.LastPicture == headingPicture && HasSharedCorner(corner.Size);
+                bool app = SharedCapture.AppPresent;
+                var top = app ? SharedCapture.TryGrab(game.Handle, c.Width, c.Height, corner, held) : ScreenPart(corner);
+                bool same = app && top == null && held && SharedCapture.SameAsLast;
+                Tally.Add(same ? Tally.N.PictureSame : top == null ? Tally.N.PictureNone : Tally.N.Picture);
+                if (top == null && !same) { Thread.Sleep(4); continue; }   // no fresh shared frame yet
+                if (same || (SharedCapture.AppPresent && Dev.SkipRepeat && SharedCapture.LastPicture == headingPicture && HasSharedCorner(top!.Size())))
                 {
                     // The same picture again: nothing new to read. Still current, so tracking's timers keep running from it.
-                    top.Dispose();
+                    if (!same) Tally.Add(Tally.N.PictureSameCopied);
+                    top?.Dispose();
                     lock (cornerGate) sharedCornerAt = grabbed;
                     int rest = HeadingPeriodMs - (int)(sw.ElapsedMilliseconds - t0);
                     if (rest > 0) Thread.Sleep(rest);
                     continue;
                 }
-                headingPicture = SharedCapture.LastPicture;
+                var picture = SharedCapture.LastPicture;
                 if (SharedCapture.AppPresent && Dev.PictureAge) grabbed -= Math.Clamp(SharedCapture.LastAgeMs, 0, 200);
-                if (SharedCapture.AppPresent && SharedCapture.ScreenCopy) top = Clean(top, corner);
+                if (SharedCapture.AppPresent && SharedCapture.ScreenCopy) top = Clean(top!, corner);
                 lock (cornerGate) { sharedCorner?.Dispose(); sharedCorner = top; sharedCornerAt = grabbed; sharedCornerSeq++; }
+                headingPicture = picture;   // (only once its copy is the one held: skip-repeat goes by this)
                 cornerReady.Set();   // the tracking loop picks it up right away instead of on its next tick
-                using (var mm = new Mat(top, InCorner(rc, corner)))
+                using (var mm = new Mat(top!, InCorner(rc, corner)))
                 {
                     var t2 = perfClock.ElapsedTicks;
                     UpdateHeading(mm, ui);
@@ -599,7 +616,7 @@ public sealed class Engine : IDisposable
     }
 
     (int at, long seq) headingPicture;
-    bool HasSharedCorner(Mat like) { lock (cornerGate) return sharedCorner != null && sharedCorner.Size() == like.Size(); }
+    bool HasSharedCorner(Size like) { lock (cornerGate) return sharedCorner != null && sharedCorner.Size() == like; }
 
     readonly object cornerGate = new();
     readonly AutoResetEvent cornerReady = new(false);
@@ -983,9 +1000,13 @@ public sealed class Engine : IDisposable
         // The corner at 1080p size, once for both the run timer and the Esc button (each made its own).
         using (var small = new Mat())
         {
+            long tShrink = Tally.Start;
             if (Dev.ResizeSkip && ui == 1) top.CopyTo(small);
             else Cv2.Resize(top, small, new Size(), 1 / ui, 1 / ui, InterpolationFlags.Area);
+            Tally.Time(Tally.N.Shrink, tShrink);
+            long tTimer = Tally.Start;
             UpdateInRun(small);
+            Tally.Time(Tally.N.Timer, tTimer);
             // The HUD is up if either the Esc button or the run timer shows (two separate elements:
             // particles, a dash or 4K scaling can spoil one for a moment). Only treat it as gone
             // after half a second without either, so the on-screen map doesn't blink.
@@ -1188,6 +1209,7 @@ public sealed class Engine : IDisposable
             var tLocate = perfClock.ElapsedTicks;
             ip = islandTracker.Locate(mm, isl, ui, false, grabbedAt);
             perfLocate.Add(perfClock.ElapsedTicks - tLocate);
+            Tally.Add(ip == null ? Tally.N.IslandNone : Tally.N.Island);
         }
         else
         {
@@ -1617,7 +1639,7 @@ public sealed class Engine : IDisposable
         {
             var area = new Rect(15, 340, 140, 320).Intersect(new Rect(0, 0, small.Width, small.Height));
             seen = false;
-            if (Dev.TimerNearby && TimerAtLastSpot(small, area, out double closeBy)) { lastTimerScore = closeBy; seen = true; }
+            if (Dev.TimerNearby && TimerAtLastSpot(small, area, out double closeBy)) { lastTimerScore = closeBy; seen = true; Tally.Add(Tally.N.TimerNear); }
             else if (area.Width > timerTemplate.Width && area.Height > timerTemplate.Height)
             {
                 using var res = new Mat();
@@ -1656,6 +1678,7 @@ public sealed class Engine : IDisposable
         if (seen != lastTimerSeen)
         {
             lastTimerSeen = seen;
+            if (!seen) Tally.Add(Tally.N.TimerLost);
             Log.Write($"run timer {(seen ? "seen" : "lost")} ({lastTimerScore:0.00})");
         }
         if (seen) CheckChallenge(small, now);
@@ -1854,6 +1877,14 @@ public sealed class Engine : IDisposable
 
     bool HudVisible(Mat small)
     {
+        long t0 = Tally.Start;
+        bool visible = EscVisible(small);
+        Tally.Time(Tally.N.Esc, t0);
+        return visible;
+    }
+
+    bool EscVisible(Mat small)
+    {
         hudTemplate ??= Cv2.ImRead(System.IO.Path.Combine(db.Root, "icons", "hud_esc.png"));
         if (hudTemplate.Empty()) return true;
         if (small.Width < hudTemplate.Width || small.Height < hudTemplate.Height) return true;
@@ -1870,6 +1901,7 @@ public sealed class Engine : IDisposable
                 Cv2.MatchTemplate(part0, hudTemplate, res, TemplateMatchModes.CCoeffNormed);
                 Cv2.MinMaxLoc(res, out _, out max, out _, out Point inNear);
                 at = new Point(near.X + inNear.X, near.Y + inNear.Y);
+                if (max >= 0.7) Tally.Add(Tally.N.EscNear);
             }
         }
         if (max < 0.7)

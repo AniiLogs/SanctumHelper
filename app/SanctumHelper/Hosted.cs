@@ -238,7 +238,7 @@ public sealed class Hosted
         {
             version = v?.ToString(3),
             gameDataVersion = db.GameDataVersion,
-            dev = Dev.Options.Select(o => new { id = o.Id, section = o.Section, area = o.Area, title = o.Title, what = o.What, gain = o.Gain, risk = o.Risk, tested = o.Tested }),
+            dev = Dev.Options.Select(o => new { id = o.Id, section = o.Section, area = o.Area, title = o.Title, what = o.What, gain = o.Gain, risk = o.Risk, tested = o.Tested, revision = o.Revision }),
             difficulties = db.Difficulties.Select(d => new { value = d, name = Lang.Difficulty(d) }),
             styles = OverlayView.MiniMapStyles.Select(m => new { value = m.Value, name = Lang.T(m.Name), description = Lang.T(m.Description) }),
             languages = Lang.Languages.Select(l => new { code = l.Code, name = l.Name }),

@@ -23,7 +23,7 @@ public static class Dev
         ChallengeAsync, SkipRepeat, ArrowRetry, StaleSearch, HostedIo, HanningCache, ResizeSkip, EscNearby, WiderDisc,
         LazyArt, FreeIdle, GrabTime, PictureAge, LogThread,
         RefinerTrim, ConeArcs, IslandShrinkOnce, LangCache, HostedScan, CompactMasks, ConeCheck, FloorRooms, BossRooms, DecodeThread, FasterArrow, RetainedMap,
-        ExitSameDoor, ConeLog, RedrawCap, Facing30, Track20, OneWorker, RockLog;
+        ExitSameDoor, ConeLog, RedrawCap, Facing30, Track20, OneWorker, RockLog, ArtWindow, Stats;
 
     const string Bench = "Bench tested", Compared = "Compared with the old pictures", Log = "Checked against a real game log", Untested = "Not tested yet";
 
@@ -43,6 +43,10 @@ public static class Dev
             "Cone reads 0.10 to 0.06 ms, and 13 KB to 0.6 KB of new memory each.", "None found: all 900 simulated minimaps gave identical answers.", Bench, v => ConeArcs = v),
         new("rock-log", NoRisk, "Accuracy", "Note the rocks the game names at each arrival", "After each area loads in an Egg Heist run, the game's own log names the rocks and props near the player. This writes those names to rocks.txt next to the helper's log, with the position the helper then settles on. Nothing shown changes and nothing reads it back yet.",
             "None yet: enough runs of this make a table of which rocks mean which landing or door, so an arrival could be placed from the game's log instead of from the screen.", "None found; a few short lines a run.", Untested, v => RockLog = v),
+        new("art-window", NoRisk, "CPU", "Sanctum: keep the map's side of a match", "Each position fix compares the minimap with a window of the map around you. That window only moves when you have moved a whole pixel of it, so while it is the same window, the part of the work done on the map is kept from the last fix instead of done again.",
+            "On simulated walks: Sanctum reads about 4.7 to 3.9 ms standing still, 4.7 to 4.5 at a slow walk, nothing at a run. Nothing on the island.", "None found: every window kept on the simulated walks was the same as a fresh one, number for number (over 50,000 checked), so the same position comes out. No real run was tried.", Bench, v => ArtWindow = v),
+        new("dev-stats", NoRisk, "Accuracy", "Count what the readers did, once a minute", "Once a minute the log gets one line of counts and timings: pictures taken or skipped, position fixes and how many were lost, coasted or jumped, how often a look-nearby switch settled it, run timer and Esc button checks, and redraws. Nothing shown changes. Leave it on with and without another switch to compare the two.",
+            "Shows from a log alone what a switch saved and whether it cost any reads.", "None found; one more log line a minute.", Untested, v => { Stats = v; Tally.Reset(); }),
         new("redraw-cap", LowRisk, "CPU", "Redraw the Corner map at most 60 times a second", "On a 120 Hz or faster screen the map was redrawn on every screen frame while you move or turn. With this on, every other frame is skipped.",
             "Unknown; about half the drawing work while moving on a 120 Hz screen. Nothing on a 60 Hz one.", "The map's glide may look less smooth on a fast screen.", Untested, v => RedrawCap = v),
         new("facing-30", LowRisk, "CPU", "Read facing 30 times a second", "The arrow and view cone are read from the minimap 30 times a second instead of 60, and the picture of the corner is asked for half as often. The map still turns smoothly between reads.",
@@ -99,8 +103,9 @@ public static class Dev
 
         new("challenge-async", LowRisk, "Smoothness", "Read challenge text off the tracking loop", "The \"Victory Conditions\" check on the island's first 30 s runs on its own thread.",
             "Removes up to about 30 short pauses each run; size unknown.", "The map hides in a challenge one read later, about a second.", Untested, v => ChallengeAsync = v),
-        new("skip-repeat", LowRisk, "CPU", "Skip pictures already read", "When the capture hands over the same picture again, facing and position aren't worked out again.",
-            "Most at low FPS: maybe 180 ms of CPU a second at 30 FPS; nothing at 60+. An estimate.", "Low: if a changed picture were ever seen as the same, an update would wait for the next one.", Untested, v => SkipRepeat = v),
+        // (Revision 1: the repeat is told apart before it is copied, not after. What gets read, and when, is as before.)
+        new("skip-repeat", LowRisk, "CPU", "Skip pictures already read", "When the capture hands over the same picture again, it isn't copied again, and facing and position aren't worked out again.",
+            "Most at low FPS: maybe 180 ms of CPU a second at 30 FPS; nothing at 60+. An estimate.", "Low: if a changed picture were ever seen as the same, an update would wait for the next one.", Untested, v => SkipRepeat = v, 1),
         new("arrow-retry", LowRisk, "Accuracy", "Retry a missed arrow read at once", "One missed arrow read no longer stops facing updates for half a second.",
             "Removes facing freezes of up to 0.5 s.", "Slightly more CPU right after a miss.", Untested, v => ArrowRetry = v),
         new("stale-search", LowRisk, "Accuracy", "Drop island searches from an old run", "A slow whole-island search that finishes after the run changed is thrown away.",
@@ -222,4 +227,68 @@ public static class Dev
 
     /// <summary>The minimap's box, where the game's files put it if that switch is on.</summary>
     public static RegionF Region(RegionF saved) => MinimapBox ? saved with { Y = saved.Y + 1.4 } : saved;
+}
+
+/// <summary>Dev switch dev-stats: counts of what the readers did, for one line in the log a minute. Numbers only: how many and how
+/// long. With the switch off nothing is counted and nothing is written.</summary>
+public static class Tally
+{
+    public enum N
+    {
+        Picture, PictureNone, PictureSame, PictureSameCopied, Shrink, Timer, TimerNear, TimerLost, Esc, EscNear,
+        Fix, FixNone, FixCoast, FixJump, FixJumpTaken, FixFloor, NearHit, NearMiss, Window, WindowKept, Island, IslandNone,
+        MapOpen, BigMap, Frame, FrameNoDraw, Tick, TickTwice, TickCapped, Count
+    }
+
+    static readonly long[] counts = new long[(int)N.Count], ticks = new long[(int)N.Count];
+    static long since = Environment.TickCount64;
+
+    /// <summary>Now, for Time below; 0 with the switch off (and then Time does nothing).</summary>
+    public static long Start => Dev.Stats ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
+
+    public static void Add(N what) { if (Dev.Stats) System.Threading.Interlocked.Increment(ref counts[(int)what]); }
+
+    public static void Time(N what, long start)
+    {
+        if (!Dev.Stats || start == 0) return;
+        System.Threading.Interlocked.Increment(ref counts[(int)what]);
+        System.Threading.Interlocked.Add(ref ticks[(int)what], System.Diagnostics.Stopwatch.GetTimestamp() - start);
+    }
+
+    /// <summary>A fresh start (the switch was just turned on or off).</summary>
+    public static void Reset()
+    {
+        for (int i = 0; i < counts.Length; i++)
+        {
+            System.Threading.Interlocked.Exchange(ref counts[i], 0);
+            System.Threading.Interlocked.Exchange(ref ticks[i], 0);
+        }
+        System.Threading.Interlocked.Exchange(ref since, Environment.TickCount64);
+    }
+
+    /// <summary>The line for the time since the last one, and a fresh start; null when nothing was read in it.</summary>
+    public static string? Report()
+    {
+        long now = Environment.TickCount64;
+        long seconds = Math.Max(1, (now - System.Threading.Interlocked.Exchange(ref since, now) + 500) / 1000);
+        var c = new long[counts.Length];
+        var ms = new double[counts.Length];
+        long all = 0;
+        for (int i = 0; i < c.Length; i++)
+        {
+            c[i] = System.Threading.Interlocked.Exchange(ref counts[i], 0);
+            long t = System.Threading.Interlocked.Exchange(ref ticks[i], 0);
+            ms[i] = c[i] > 0 ? t * 1000.0 / System.Diagnostics.Stopwatch.Frequency / c[i] : 0;
+            all += c[i];
+        }
+        if (all == 0) return null;
+        long C(N what) => c[(int)what];
+        string T(N what) => C(what) == 0 ? "0" : FormattableString.Invariant($"{C(what)} x {ms[(int)what]:0.00} ms");
+        return $"stats {seconds} s: pictures {C(N.Picture)} (none {C(N.PictureNone)}, same {C(N.PictureSame)}, same but copied {C(N.PictureSameCopied)})"
+            + $" · shrink {T(N.Shrink)} · timer {T(N.Timer)} (nearby {C(N.TimerNear)}, lost {C(N.TimerLost)}) · Esc {T(N.Esc)} (nearby {C(N.EscNear)})"
+            + $" · fixes {C(N.Fix)} (none {C(N.FixNone)}, coasted {C(N.FixCoast)}, jumps waited {C(N.FixJump)}, taken {C(N.FixJumpTaken)}, floor changes {C(N.FixFloor)})"
+            + $" · near settled {C(N.NearHit)}, not {C(N.NearMiss)} · window kept {C(N.WindowKept)} of {C(N.Window)}"
+            + $" · island {C(N.Island)} (none {C(N.IslandNone)}) · map open {T(N.MapOpen)} · big map {T(N.BigMap)}"
+            + $" · frames drawn {C(N.Frame)}, left {C(N.FrameNoDraw)} · ticks {C(N.Tick)} (twice {C(N.TickTwice)}, capped {C(N.TickCapped)})";
+    }
 }
