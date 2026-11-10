@@ -411,6 +411,8 @@ public sealed class OverlayView : FrameworkElement
         // WPF can raise this more than once for a display frame: nothing new to show the second time.
         if (Dev.DuplicateTick && e is RenderingEventArgs re) { if (re.RenderingTime == lastRenderTime) return; lastRenderTime = re.RenderingTime; }
         var now = DateTime.UtcNow;
+        // Dev switch redraw-cap: on a 120 Hz or faster screen, every other frame is left as it is (at most ~60-80 steps a second).
+        if (Dev.RedrawCap && (now - lastTick).TotalMilliseconds < 12) return;
         double dt = Math.Min(0.1, (now - lastTick).TotalSeconds);
         lastTick = now;
         if (Frame is not { Mini: true, Visible: true, Player: OpenCvSharp.Point2d fix } fr) { shown = null; shownHeading = shownCamera = null; return; }
@@ -420,7 +422,8 @@ public sealed class OverlayView : FrameworkElement
         bool live = (now - liveStamp).TotalSeconds < 1.5;
         // ~15 ms (was 35): readings now come ~60 a second already smoothed, so this only bridges
         // display frames; 35 ms trailed a fast camera turn by ~12 degrees on its own.
-        double ta = 1 - Math.Exp(-dt / 0.015);
+        // (Dev switch facing-30: readings come half as often, so the turn is spread over twice as long.)
+        double ta = 1 - Math.Exp(-dt / (Dev.Facing30 ? 0.030 : 0.015));
         bool turned = Turn(ref shownHeading, live ? liveHeading : fr.Heading, ta);
         turned |= Turn(ref shownCamera, live ? liveCamera : fr.Camera, ta);
         if (turned && !TurnRetained()) InvalidateVisual();
@@ -441,7 +444,8 @@ public sealed class OverlayView : FrameworkElement
         if (Math.Abs(cur.X - target.X) + Math.Abs(cur.Y - target.Y) < 0.3) return;
         // ~35 ms (was 70): smooths ticks and small corrections, the tracker already filters. Fixes come
         // ~40 a second now (were ~20), so less is needed; 70 ms trailed a walking player by 70 ms.
-        double a = 1 - Math.Exp(-dt / 0.035);
+        // (Dev switch track-20: back to ~20 fixes a second, so a little more smoothing again.)
+        double a = 1 - Math.Exp(-dt / (Dev.Track20 ? 0.055 : 0.035));
         shown = new OpenCvSharp.Point2d(cur.X + (target.X - cur.X) * a, cur.Y + (target.Y - cur.Y) * a);
         if (!MoveRetained()) InvalidateVisual();
     }

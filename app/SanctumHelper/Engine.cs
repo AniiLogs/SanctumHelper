@@ -190,7 +190,8 @@ public sealed class Engine : IDisposable
         // OpenCV splits work over every core by default (16 here). The per-tick matches are tiny
         // and ran slower that way (heading 12 ms -> 7 ms on 1-4 threads), and bursts on all cores
         // take CPU from the game. Four keeps the background whole-map searches reasonably quick.
-        Cv2.SetNumThreads(4);
+        // (Dev switch one-worker: one, so a match stays on the thread that asked for it.)
+        Cv2.SetNumThreads(Dev.OneWorker ? 1 : 4);
         this.db = db;
         this.settings = settings;
         this.hook = hook;
@@ -394,6 +395,7 @@ public sealed class Engine : IDisposable
                 {
                     nextGameLog = now + 250;
                     gameLog.Poll();
+                    if (Dev.RockLog) RockLog();
                 }
                 if (now >= nextWindow)
                 {
@@ -455,7 +457,7 @@ public sealed class Engine : IDisposable
                     else
                     {
                         // A fix per new corner copy (the same picture twice gives the same fix).
-                        if (NewCorner || now - lastBigFix >= 40) { lastBigFix = now; TrackMinimap(); }
+                        if (Dev.Track20 ? now - lastBigFix >= 50 : NewCorner || now - lastBigFix >= 40) { lastBigFix = now; TrackMinimap(); }
                         ShowBig();
                     }
                     wasShowing = true;
@@ -517,7 +519,8 @@ public sealed class Engine : IDisposable
                 // shown, and tracking there was 2-3 copies and fixes a second for nothing (a player's lag report, B4)
                 if (now >= nextMinimap && settings.TrackMinimap && InEggHeist && (!fast || NewCorner || now >= nextMinimap + 40))
                 {
-                    nextMinimap = now + (fast ? 25 : 350);
+                    // (Dev switch track-20: a fix every 50 ms instead of every 25.)
+                    nextMinimap = now + (fast ? (Dev.Track20 ? 50 : 25) : 350);
                     var t1 = perfClock.ElapsedTicks;
                     TrackMinimap();
                     ShowMini();
@@ -543,7 +546,9 @@ public sealed class Engine : IDisposable
     Thread? headingThread;
     // 16 ms: one screen copy per desktop frame at 60 Hz. The copy itself waits for the desktop to
     // compose (measured ~11 ms at any size, 1080p or 4K), reading the arrow and cone ~2-7 ms more.
-    const int HeadingPeriodMs = 16;
+    // Dev switch facing-30: every other frame (33 ms), and a corner copy counts as fresh for twice as long.
+    static int HeadingPeriodMs => Dev.Facing30 ? 33 : 16;
+    static int CornerFreshMs => Dev.Facing30 ? 80 : 40;
 
     void HeadingLoop()
     {
@@ -620,7 +625,7 @@ public sealed class Engine : IDisposable
         lock (cornerGate)
         {
             // 40 ms (was 60): the heading loop copies one every ~16 ms, so anything older means it is stalled.
-            if (sharedCorner == null || Environment.TickCount64 - sharedCornerAt > 40 || sharedCorner.Width != corner.Width || sharedCorner.Height != corner.Height)
+            if (sharedCorner == null || Environment.TickCount64 - sharedCornerAt > CornerFreshMs || sharedCorner.Width != corner.Width || sharedCorner.Height != corner.Height)
                 return null;
             trackedCornerSeq = sharedCornerSeq;
             copiedAt = DateTime.UtcNow.AddMilliseconds(sharedCornerAt - Environment.TickCount64);
@@ -631,7 +636,7 @@ public sealed class Engine : IDisposable
     /// <summary>The heading loop has copied a corner the tracking hasn't used yet.</summary>
     bool NewCorner
     {
-        get { lock (cornerGate) return sharedCorner != null && sharedCornerSeq != trackedCornerSeq && Environment.TickCount64 - sharedCornerAt <= 40; }
+        get { lock (cornerGate) return sharedCorner != null && sharedCornerSeq != trackedCornerSeq && Environment.TickCount64 - sharedCornerAt <= CornerFreshMs; }
     }
 
     void UpdateHeading(Mat mm, double ui)
@@ -1338,9 +1343,44 @@ public sealed class Engine : IDisposable
                 // first; a whole-island search can't place open ground (the grass fields).
                 islandArrival = newRun ? "boat" : "entrance_side";
                 islandArrivalTries = 0;
+                rockArrival = newRun ? "at a run's start" : "out of the Sanctum";
                 break;
         }
         StatusChanged?.Invoke();
+    }
+
+    // ---- Dev switch rock-log: what the game named around the player after each load, next to where the helper then
+    // finds the player. Logging only (rocks.txt beside log.txt, which rolls over in a few hours): nothing reads it back.
+    int rockSeq, rockPlacedVisit = -1, rockNamesVisit = -1;
+    string rockArrival = "";
+    readonly HashSet<string> rockWritten = new();
+
+    void RockLog()
+    {
+        var where = gameLog.Where;
+        if (where is not (GameLog.Place.Island or GameLog.Place.Sanctum)) return;
+        int visit = gameLog.Visit;
+        if (rockNamesVisit != visit) { rockNamesVisit = visit; rockWritten.Clear(); }
+        string what = where == GameLog.Place.Island ? $"island {rockArrival}".TrimEnd() : $"Sanctum{(gameLog.SanctumScene is int scene ? $" (scene {scene})" : "")}";
+        // Where the helper has the player right now, if it does.
+        var now = DateTime.UtcNow;
+        string? at = where == GameLog.Place.Island
+            ? onIsland && islandPlayer is Point2d ip && (now - islandTime).TotalSeconds < 3 ? $"island ({ip.X:0},{ip.Y:0})" : null
+            : !onIsland && CurrentLayout is Layout l && !l.IsIsland && player is Point2d sp && (now - minimapTime).TotalSeconds < 3 ? $"layout {l.Number} ({sp.X:0},{sp.Y:0})" : null;
+        // The names come in a burst after loading and a few more as the player walks on: written once quiet for a second.
+        if (gameLog.MeshSeq != rockSeq && (now - gameLog.MeshAt).TotalSeconds >= 1)
+        {
+            rockSeq = gameLog.MeshSeq;
+            var all = gameLog.Meshes();
+            var added = all.Where(n => rockWritten.Add(n)).ToArray();
+            if (added.Length > 0)
+                Rocks.Write($"visit {visit} | {what} | {(at != null ? "at " + at : "not placed yet")} | {added.Length} new of {all.Length} | {string.Join(" ", added)}");
+        }
+        if (rockPlacedVisit != visit && at != null)
+        {
+            rockPlacedVisit = visit;
+            Rocks.Write($"visit {visit} | {what} | first placed at {at} | {gameLog.Meshes().Length} named so far");
+        }
     }
 
     long lastMinimapLog = -10000, lastSlowTick = -10000;

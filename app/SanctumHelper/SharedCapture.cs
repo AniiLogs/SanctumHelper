@@ -228,7 +228,8 @@ public static class SharedCapture
             long t = Environment.TickCount64;
             // Ask at the pace we're being called: ~60 a second while the overlay key is held, twice a second on the
             // party screen, nothing otherwise (the request lapses).
-            if (lastCall != 0) interval = Math.Clamp(0.7 * interval + 0.3 * (t - lastCall), 16, 1000);
+            // (Dev switch facing-30: never asked for faster than 30 a second, whatever else reads in between.)
+            if (lastCall != 0) interval = Math.Clamp(0.7 * interval + 0.3 * (t - lastCall), Dev.Facing30 ? 33 : 16, 1000);
             lastCall = t;
             if (!Open()) return null;
             long now = NowMs;
