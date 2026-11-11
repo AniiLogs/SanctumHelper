@@ -23,7 +23,7 @@ public static class Dev
         ChallengeAsync, SkipRepeat, ArrowRetry, StaleSearch, HostedIo, HanningCache, ResizeSkip, EscNearby, WiderDisc,
         LazyArt, FreeIdle, GrabTime, PictureAge, LogThread,
         RefinerTrim, ConeArcs, IslandShrinkOnce, LangCache, HostedScan, CompactMasks, ConeCheck, FloorRooms, BossRooms, DecodeThread, FasterArrow, RetainedMap,
-        ExitSameDoor, ConeLog, RedrawCap, Facing30, Track20, OneWorker, RockLog, ArtWindow, Stats;
+        ExitSameDoor, ConeLog, RedrawCap, Facing30, Track20, OneWorker, RockLog, ArtWindow, Stats, ChestRooms;
 
     const string Bench = "Bench tested", Compared = "Compared with the old pictures", Log = "Checked against a real game log", Untested = "Not tested yet";
 
@@ -132,6 +132,8 @@ public static class Dev
             "Unknown: there's no recording of real cones to measure on, and simulated ones showed no gain.", "If the width measured is off, a good reading could go to the less exact reader.", Untested, v => ConeCheck = v),
         new("floor-rooms", LowRisk, "CPU", "Floors: only where the game has them", "The upper floor is compared only in or near rooms that have one, from the game's files (the upper floor's art has none anywhere else).",
             "Outside those rooms, Sanctum reads 5.4 to 4.2 ms, and leaving one is seen at once, not after 100 ms. Nothing measurable on walks that stay in or near them.", "A position over 10 m off could miss a floor change until the read is lost; a patch moving rooms would need new data. Floor changes matched with this off on 24 simulated layouts.", Bench, v => FloorRooms = v),
+        new("chest-sets", LowRisk, "Accuracy", "Chests: only the sets this run can have", "A room's chest marks are several fixed sets on top of each other, one per grade, and a run gives a room one of them at most. With this on, the sets the difficulty never hands out aren't drawn (Normal: rooms get grades 2 to 4, Hard 2 to 5), and the full map names the sets still possible in each room. Needs the difficulty to be known.",
+            "Fewer chest marks that can't be there: no Legendary chance marks outside key rooms on Normal and Hard.", "The grades per difficulty are from the game's reward table and not checked against a real run: if it's read wrong, a chest that is there would have no mark.", Untested, v => ChestRooms = v),
         new("boss-rooms", LowRisk, "Accuracy", "Show boss rooms", "Boss rooms get a frame like key rooms (under the Challenge layer) and a mark on Radar and Compass, and their Legendary chest shows as certain, not as a chance. Layouts 31, 33, 38, 61, 62.",
             "The boss room can be seen, and that its chest is there.", "The game's data has that chest with no alternative, but spawned differently from every other Legendary: it may only appear once the boss is down. Not seen in a real run.", Compared, v => BossRooms = v),
         new("decode-thread", LowRisk, "Smoothness", "Load map pictures off the display thread", "A map's pictures load on another thread when its layout comes up. Until one is ready, only that picture is missing, for a frame or two.",

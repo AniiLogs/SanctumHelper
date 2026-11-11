@@ -855,7 +855,7 @@ public sealed class OverlayView : FrameworkElement
     /// <summary>The map at (0,0), ready to move: made again only if something in it changed.</summary>
     DrawingGroup RetainedMapGroup(Layout L, int floor, BitmapSource? art, bool outline, double scale, double ms, bool labels)
     {
-        var key = (L.Number, floor, art, scale, ms, labels, string.Join(",", LayerKinds.Where(settings.Layer)), Lang.Code, Dev.BossRooms, Dev.LabelCache);
+        var key = (L.Number, floor, art, scale, ms, labels, string.Join(",", LayerKinds.Where(settings.Layer)), Lang.Code, Dev.BossRooms, Dev.LabelCache, ChestRun(L)?.Difficulty, ChestRun(L)?.Version);
         if (retainedMap != null && key.Equals(retainedFor)) return retainedMap;
         var group = new DrawingGroup();
         using (var dc = group.Open())
@@ -1317,8 +1317,12 @@ public sealed class OverlayView : FrameworkElement
     static readonly Pen RadarRing = Freeze(new Pen(new SolidColorBrush(Color.FromArgb(70, 120, 210, 255)), 1));
 
     /// <summary>Doors, key rooms, challenge room, nests and loot with the game's own map icons.</summary>
+    /// <summary>Dev switch chest-sets: what this run's rooms can still hold, or null with it off or on the island.</summary>
+    ChestSets.Run? ChestRun(Layout L) => Dev.ChestRooms && !L.IsIsland ? ChestSets.For(L, frame?.Difficulty) : null;
+
     void DrawMarkers(DrawingContext dc, Layout L, Func<double[], Point> P, double ms, bool labels)
     {
+        var chestRun = ChestRun(L);
         // Everything below uses the game's own map-mark icons (Assets/icons, from the game files).
         double icon = 36 * ms;
 
@@ -1381,6 +1385,7 @@ public sealed class OverlayView : FrameworkElement
             if (!settings.Layer(kind)) continue;
             foreach (var m in L.Markers.Where(m => m.Kind == kind))
             {
+                if (chestRun != null && !chestRun.Shows(m)) continue;
                 var p = P(m.Img);
                 switch (kind)
                 {
@@ -1399,6 +1404,20 @@ public sealed class OverlayView : FrameworkElement
                     case "simple": Icon(dc, "chest_white", p, icon * 0.52); break;
                     default: Icon(dc, "chest", p, icon * 0.45, 0.85); break;
                 }
+            }
+        }
+
+        // The sets each room can still have, under its middle: "Sets 2-4", or "Set 4" once a chest seen settled it.
+        if (chestRun != null && labels)
+        {
+            foreach (var r in L.Rooms)
+            {
+                var grades = chestRun.Possible(r.Id);
+                if (grades.Count == 0) continue;
+                bool one = chestRun.Confirmed(r.Id);
+                string text = one ? Lang.F("Set {0}", grades[0]) : Lang.F("Sets {0}", string.Join(" ", grades));
+                var c = P(r.Img);
+                Label(dc, text, new Point(c.X, c.Y + icon * 0.9), one ? Colors["legendary"] : Color.FromRgb(0xC9, 0xCB, 0xD6), (one ? 12 : 10.5) * ms, above: false);
             }
         }
 
