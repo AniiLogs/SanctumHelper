@@ -114,6 +114,31 @@ public static class ChestSets
                 return any;
             }
         }
+
+        /// <summary>A chest's prompt was up with the player at this spot of the layout's picture: the chest is the nearest one
+        /// of a set still possible, within 4 m (the prompt's reach plus the position's error). Null, and nothing changes, when
+        /// none is that near or another spot is about as near: a second spot of the possible sets, or one of the chests in
+        /// "others" (the layout's chests outside the graded sets), so it can't be told which one the prompt is for.</summary>
+        public Marker? SawNear(double imgX, double imgY, double pxPerMetre, IEnumerable<Marker> others, double within = 4.0, double clear = 1.5)
+        {
+            double ppm = Math.Max(1e-6, pxPerMetre);
+            double Away(Marker c) => Math.Sqrt((c.Img[0] - imgX) * (c.Img[0] - imgX) + (c.Img[1] - imgY) * (c.Img[1] - imgY)) / ppm;
+            static double Apart(Marker a, Marker b) => Math.Sqrt((a.World[0] - b.World[0]) * (a.World[0] - b.World[0]) + (a.World[1] - b.World[1]) * (a.World[1] - b.World[1]));
+            lock (possible)
+            {
+                var near = new List<(Marker m, double d)>();
+                foreach (var (room, by) in sets)
+                    foreach (int g in possible[room])
+                        foreach (var c in by[g])
+                            if (Away(c) is double d && d <= within + clear) near.Add((c, d));
+                if (near.Count == 0) return null;
+                var (best, bestD) = near.MinBy(n => n.d);
+                if (bestD > within) return null;
+                if (near.Any(n => n.d < bestD + clear && Apart(n.m, best) > Reach)) return null;
+                if (others.Any(o => Away(o) < bestD + clear && Apart(o, best) > Reach)) return null;
+                return Saw(best.World[0], best.World[1]) ? best : null;
+            }
+        }
     }
 
     static Run? current;
