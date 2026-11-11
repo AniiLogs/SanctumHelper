@@ -301,7 +301,7 @@ public sealed class Engine : IDisposable
     void Loop()
     {
         var sw = clock;
-        long nextWindow = 0, nextOcr = 0, nextMinimap = 0, nextGameLog = 0, nextLangCheck = 5000, nextPerfLog = 10000, nextStats = 60000;
+        long nextWindow = 0, nextOcr = 0, nextMinimap = 0, nextGameLog = 0, nextLangCheck = 5000, nextPerfLog = 10000, nextStats = 60000, nextPrompt = 0;
         bool wasShowing = false;
         while (running)
         {
@@ -536,6 +536,8 @@ public sealed class Engine : IDisposable
                     ShowMini();
                     perfTrack.Add(perfClock.ElapsedTicks - t1);
                 }
+                // Dev switch chest-prompt: the Search prompt's small spot, in a Sanctum only, about twice a second.
+                if (Dev.ChestRooms && Dev.ChestSearch && now >= nextPrompt) { nextPrompt = now + 600; ReadChestPrompt(); }
                 // Sleep until the next fix is due, or (while fast) until a new corner copy lands.
                 long t = sw.ElapsedMilliseconds, due = t < nextMinimap ? nextMinimap : nextMinimap + 40;
                 if (fast && settings.TrackMinimap) cornerReady.WaitOne((int)Math.Clamp(due - t, 1, 15));
@@ -916,6 +918,53 @@ public sealed class Engine : IDisposable
             }
         }
         return ScreenPart(sub);
+    }
+
+    Mat? promptText;      // the text of the prompt that is up, to tell when it changes
+    bool promptIsChest;   // that text read "Search"
+    bool promptCounted;   // and its chest was already counted
+
+    /// <summary>Dev switch chest-prompt: with the game's Search prompt up and the player at a chest spot of the map, that
+    /// room's sets without a chest there are ruled out (ChestSets). Only in a Sanctum with a position under 1.5 s old. The
+    /// text is read once each time a prompt comes up or changes, and never logged: other prompts hold players' names.</summary>
+    void ReadChestPrompt()
+    {
+        if (CurrentLayout is not Layout l || l.IsIsland || onIsland || !InRun || !ocr.Available
+            || player is not Point2d at || (DateTime.UtcNow - playerTime).TotalSeconds > 1.5) { PromptGone(); return; }
+        var c = game.Client;
+        var rc = ChestPrompt.Area(c.Width, c.Height);
+        if (rc.Width < 60 || rc.Height < 16) return;
+        using var area = SharedCapture.AppPresent ? Grab(rc) : ScreenPart(rc);
+        if (SharedCapture.AppPresent && noPicture) return;
+        if (!ChestPrompt.Up(area)) { PromptGone(); return; }
+        using var text = ChestPrompt.Text(area);
+        bool same = false;
+        if (promptText != null && promptText.Size() == text.Size())
+        {
+            using var diff = new Mat();
+            Cv2.Absdiff(text, promptText, diff);
+            same = Cv2.Mean(diff).Val0 < 6;
+        }
+        if (!same)
+        {
+            promptText?.Dispose();
+            promptText = text.Clone();
+            promptIsChest = ChestPrompt.IsChest(ocr.Read(text));
+            promptCounted = false;
+        }
+        if (!promptIsChest || promptCounted) return;
+        var run = ChestSets.For(l, EffectiveDifficulty);
+        if (run.SawNear(at.X, at.Y, l.PxPerMetre, l.Markers.Where(m => ChestSets.IsChest(m) && ChestSets.Grade(m.Group) == 0)) is not Marker chest) return;
+        promptCounted = true;
+        var left = run.Possible(chest.Room);
+        Log.Write($"chest prompt: a chest in room {chest.Room} of layout {l.Number}, set{(left.Count == 1 ? "" : "s")} left G{string.Join(" G", left)}");
+    }
+
+    void PromptGone()
+    {
+        promptText?.Dispose();
+        promptText = null;
+        promptIsChest = promptCounted = false;
     }
 
     /// <summary>Raised when window capture fails, so the overlay can hide itself from captures again.</summary>
