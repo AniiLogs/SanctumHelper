@@ -34,6 +34,8 @@ public sealed class Marker
     public string Kind { get; set; } = "";
     public string Name { get; set; } = "";
     public int Room { get; set; }
+    /// <summary>The set it spawns with: the last part of its sandbox's name ("G4宝箱" is a room's grade 4 chest set).</summary>
+    public string Group { get; set; } = "";
     public double[] World { get; set; } = [];
     public double[] Img { get; set; } = [];
 }
@@ -107,6 +109,8 @@ public sealed class LayoutDb
 {
     public string GameDataVersion { get; set; } = "";
     public List<string> Difficulties { get; set; } = [];
+    /// <summary>Difficulty, then "room" or "hallway": the chest grades handed out (see ChestSets).</summary>
+    public Dictionary<string, Dictionary<string, List<int>>> Grades { get; set; } = [];
     public List<Layout> Layouts { get; set; } = [];
 
     [JsonIgnore] public string Root { get; private set; } = "";
@@ -117,6 +121,7 @@ public sealed class LayoutDb
         var db = JsonSerializer.Deserialize<LayoutDb>(json, new JsonSerializerOptions { PropertyNameCaseInsensitive = true })
                  ?? throw new InvalidDataException("layouts.json is empty");
         db.Root = assetsDir;
+        ChestSets.Grades = db.Grades;
         return db;
     }
 

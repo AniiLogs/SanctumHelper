@@ -275,7 +275,7 @@ public sealed class Engine : IDisposable
             lastPose = null; player = null; minimap.Reset();
             prevGray?.Dispose(); prevGray = null; prevGrayPose = null;
         }
-        CurrentLayout = l;
+        CurrentLayout = l; ChestSets.Reset();
         LayoutSource = source;
         misfitSince = null;
         // The layout says the difficulty when it belongs to just one: corrects a stale reading
@@ -311,7 +311,7 @@ public sealed class Engine : IDisposable
                 if (resetRequested)
                 {
                     resetRequested = false;
-                    CurrentLayout = null; lastPose = null; player = null; minimap.Reset();
+                    CurrentLayout = null; lastPose = null; player = null; minimap.Reset(); ChestSets.Reset();
                     if (Dev.OldPanFix) { prevGray?.Dispose(); prevGray = null; prevGrayPose = null; }
                     onIsland = false; islandPlayer = null; islandPose = null; islandTracker.Reset(); islandTracker.Release();
                     ClearGuesses();

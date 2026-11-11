@@ -64,6 +64,59 @@
    20062
   ]
  },
+ "grades": {
+  "Normal": {
+   "room": [
+    2,
+    3,
+    4
+   ],
+   "hallway": [
+    1,
+    2
+   ]
+  },
+  "Hard": {
+   "room": [
+    2,
+    3,
+    4,
+    5
+   ],
+   "hallway": [
+    1,
+    2
+   ]
+  },
+  "Nightmare": {
+   "room": [
+    2,
+    3,
+    4,
+    5,
+    6
+   ],
+   "hallway": [
+    1,
+    2,
+    3
+   ]
+  },
+  "Chaos": {
+   "room": [
+    2,
+    3,
+    4,
+    5,
+    6
+   ],
+   "hallway": [
+    1,
+    2,
+    3
+   ]
+  }
+ },
  "missingArt": [],
  "layouts": [
   {

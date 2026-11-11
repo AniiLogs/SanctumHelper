@@ -372,8 +372,13 @@ def main():
                 # to the eye and ~7x smaller than RGBA.
                 Image.open(src).convert("RGBA").quantize(colors=256, method=Image.Quantize.FASTOCTREE)                     .save(os.path.join(a.out, "maps", os.path.basename(p)), optimize=True)
                 used.add(p)
+    # Which chest grades (the G1-G6 in a set's name) a difficulty hands out, for rooms and for hallways:
+    # digong_reward_data, rows "<difficulty>-room" and "<difficulty>-hallway", grades with a count above 0.
+    reward = py(r["digong_reward_data"])
+    grades = {name: {kind: [g for g in range(1, 7) if (reward.get(f"{name}-{kind}") or {}).get(f"G{g}", 0) > 0]
+                     for kind in ("room", "hallway")} for name in DIFFICULTIES.values()}
     db = {"gameDataVersion": version, "mode": int(MODE), "difficulties": list(DIFFICULTIES.values()),
-          "pools": {name: pools[i] for i, name in DIFFICULTIES.items()}, "missingArt": missing, "layouts": layouts}
+          "pools": {name: pools[i] for i, name in DIFFICULTIES.items()}, "grades": grades, "missingArt": missing, "layouts": layouts}
     json.dump(db, open(os.path.join(a.out, "layouts.json"), "w", encoding="utf8"), ensure_ascii=False, indent=1)
     for L in layouts:
         kinds = {}
