@@ -1146,14 +1146,14 @@ public sealed class Engine : IDisposable
             double bestScore = 0;
             string? bestKind = null;
             var scores = "";
-            // Dev switch exit-same-door: out of a Sanctum, the door you went in by first (about a second), then all ten
-            // doors, orange and blue: the five blue ones alone placed every exit at another spawn's door (10 Nov logs).
+            // Dev switch exit-same-door: out of a Sanctum, all ten doors, orange and blue: the five blue ones alone placed
+            // every exit at another spawn's door (10 Nov logs). The door you went in by only wins a near tie: looked at
+            // alone for the first second, it took an exit by another door on a 0.44 match (11 Nov log).
             var expectedDoor = Dev.ExitSameDoor && islandArrival == "entrance_side" ? ExpectedExitDoor(isl) : null;
             IEnumerable<Marker> spots = isl.Markers.Where(m => m.Kind == islandArrival);
             if (Dev.ExitSameDoor && islandArrival == "entrance_side")
-                spots = expectedDoor is Point2d ed && islandArrivalTries < 20
-                    ? isl.Markers.Where(m => m.Kind is "entrance_main" or "entrance_side" && Math.Abs(m.Img[0] - ed.X) + Math.Abs(m.Img[1] - ed.Y) < 1)
-                    : isl.Markers.Where(m => m.Kind is "entrance_main" or "entrance_side");
+                spots = isl.Markers.Where(m => m.Kind is "entrance_main" or "entrance_side");
+            double bestRank = 0;
             foreach (var m in spots)
             {
                 islandTracker.Reset();
@@ -1161,8 +1161,10 @@ public sealed class Engine : IDisposable
                 islandTracker.Seed(spot);
                 var found = islandTracker.Locate(mm, isl, ui, false) is Point2d;
                 if (Dev.ExitSameDoor && islandArrival == "entrance_side") scores += $"{(scores.Length > 0 ? ", " : "")}{DoorName(m.Kind)} ({m.Img[0]:0},{m.Img[1]:0}) {(found ? islandTracker.LastScore.ToString("0.00") : "-")}";
-                if (found && islandTracker.LastScore > bestScore)
+                double rank = islandTracker.LastScore + (expectedDoor is Point2d ed && Math.Abs(m.Img[0] - ed.X) + Math.Abs(m.Img[1] - ed.Y) < 1 ? 0.05 : 0);
+                if (found && rank > bestRank)
                 {
+                    bestRank = rank;
                     // The player stands at the portal / landing itself: start there, not at the
                     // (weaker, possibly off) match that picked it.
                     best = spot;
@@ -1171,6 +1173,13 @@ public sealed class Engine : IDisposable
                 }
             }
             islandTracker.Reset();
+            // A weak best match waits about a second for a better picture (the minimap fades in): the doors really come
+            // out of measured 0.55 to 0.78, the wrong ones 0.42 to 0.50. After that the best one is taken as before.
+            if (best != null && Dev.ExitSameDoor && islandArrival == "entrance_side" && bestScore < 0.6 && islandArrivalTries < 20)
+            {
+                if (slowTick) islandArrivalTries++;
+                return;
+            }
             if (best is Point2d at)
             {
                 islandTracker.Seed(at);
