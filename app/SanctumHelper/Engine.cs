@@ -362,16 +362,7 @@ public sealed class Engine : IDisposable
                     // screen reads) that can be minutes - a report showed 850 MB growing to 1.4 GB again and again.
                     // Grown by 150 MB since the last collection: collect now, and say what that freed.
                     // Off this thread: waiting for the finalizers here held up the map.
-                    if (mem - memAfterCollect > 150 && !Dev.GcThread)
-                    {
-                        GC.Collect();
-                        GC.WaitForPendingFinalizers();
-                        GC.Collect();
-                        var after = PrivateMb();
-                        Log.Write($"memory: collected {mem - after} MB ({mem} -> {after} MB)");
-                        memAfterCollect = mem = after;
-                    }
-                    else if (mem - memAfterCollect > 150)
+                    if (mem - memAfterCollect > 150)
                     {
                         memAfterCollect = mem;
                         long before = mem;
@@ -1159,8 +1150,8 @@ public sealed class Engine : IDisposable
         if (!settings.IslandMap || db.Island is not Layout isl || !hudVisible || !islandLike) { odoPrev?.Dispose(); odoPrev = null; return; }
         // How far the player moved since the last frame, from how far the minimap scrolled. It
         // carries the position across open ground where nothing on the minimap can be matched.
-        using var shrunk = Dev.IslandShrinkOnce ? new Mat() : null;
-        if (shrunk != null) Cv2.Resize(mm, shrunk, new Size(), 1 / ui, 1 / ui, InterpolationFlags.Area);   // (both below want this)
+        using var shrunk = new Mat();
+        Cv2.Resize(mm, shrunk, new Size(), 1 / ui, 1 / ui, InterpolationFlags.Area);   // scaled once: both checks below want it
         var step = MinimapStep(mm, ui, shrunk);
         Point2d? dead = onIsland && islandPlayer is Point2d cur0 && (now - islandTime).TotalSeconds < 3
             ? new Point2d(cur0.X + (step?.X ?? 0), cur0.Y + (step?.Y ?? 0)) : null;

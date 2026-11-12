@@ -416,7 +416,7 @@ public sealed class OverlayView : FrameworkElement
             Tally.Add(counted.RenderingTime == countedRenderTime ? Tally.N.TickTwice : Tally.N.Tick);
             countedRenderTime = counted.RenderingTime;
         }
-        if (Dev.DuplicateTick && e is RenderingEventArgs re) { if (re.RenderingTime == lastRenderTime) return; lastRenderTime = re.RenderingTime; }
+        if (e is RenderingEventArgs re) { if (re.RenderingTime == lastRenderTime) return; lastRenderTime = re.RenderingTime; }
         var now = DateTime.UtcNow;
         // Dev switch redraw-cap: on a 120 Hz or faster screen, every other frame is left as it is (at most ~60-80 steps a second).
         if (Dev.RedrawCap && (now - lastTick).TotalMilliseconds < 12) { Tally.Add(Tally.N.TickCapped); return; }
@@ -855,7 +855,7 @@ public sealed class OverlayView : FrameworkElement
     /// <summary>The map at (0,0), ready to move: made again only if something in it changed.</summary>
     DrawingGroup RetainedMapGroup(Layout L, int floor, BitmapSource? art, bool outline, double scale, double ms, bool labels)
     {
-        var key = (L.Number, floor, art, scale, ms, labels, string.Join(",", LayerKinds.Where(settings.Layer)), Lang.Code, Dev.BossRooms, Dev.LabelCache, ChestRun(L)?.Difficulty, ChestRun(L)?.Version);
+        var key = (L.Number, floor, art, scale, ms, labels, string.Join(",", LayerKinds.Where(settings.Layer)), Lang.Code, Dev.BossRooms, ChestRun(L)?.Difficulty, ChestRun(L)?.Version);
         if (retainedMap != null && key.Equals(retainedFor)) return retainedMap;
         var group = new DrawingGroup();
         using (var dc = group.Open())
@@ -1593,17 +1593,6 @@ public sealed class OverlayView : FrameworkElement
 
     static void Label(DrawingContext dc, string text, Point at, Color color, double size, bool above)
     {
-        if (!Dev.LabelCache)
-        {
-            var ft = new FormattedText(text, CultureInfo.InvariantCulture, FlowDirection.LeftToRight, Face, Math.Max(9, size), new SolidColorBrush(color), 1.0);
-            var origin = new Point(at.X - ft.Width / 2, above ? at.Y - ft.Height : at.Y);
-            var outline = ft.BuildGeometry(origin);
-            if (spin != 0) dc.PushTransform(new RotateTransform(spin, at.X, at.Y));
-            dc.DrawGeometry(null, new Pen(new SolidColorBrush(Color.FromArgb(220, 0, 0, 0)), Math.Max(2.5, size / 4)) { LineJoin = PenLineJoin.Round }, outline);
-            dc.DrawText(ft, origin);
-            if (spin != 0) dc.Pop();
-            return;
-        }
         var drawing = LabelDrawing(text, color, size, above);
         if (spin != 0) dc.PushTransform(new RotateTransform(spin, at.X, at.Y));
         dc.PushTransform(new TranslateTransform(at.X, at.Y));

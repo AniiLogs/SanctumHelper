@@ -41,7 +41,7 @@ public sealed class MapArt : IDisposable
 
     void MakeMask()
     {
-        var (g0, a0) = Dev.ArtStrips ? StripGrayAlpha() : WholeGrayAlpha();
+        var (g0, a0) = GrayAlpha();
         using (g0)
         using (a0)
         using (var seen = new Mat())
@@ -87,13 +87,13 @@ public sealed class MapArt : IDisposable
         lock (bgrGate)
         {
             if (gray != null) return;
-            var (g0, a0) = Dev.ArtStrips ? StripGrayAlpha() : WholeGrayAlpha();
+            var (g0, a0) = GrayAlpha();
             alpha = a0;
             gray = g0;
         }
     }
 
-    (Mat gray, Mat alpha) StripGrayAlpha()
+    (Mat gray, Mat alpha) GrayAlpha()
     {
         // Upper-floor images can be cropped at the bottom/right (empty tiles not shipped): pad
         // them to the ground floor's size so all floors share coordinates.
@@ -105,58 +105,6 @@ public sealed class MapArt : IDisposable
         var made = OnBackground(g, a);
         foreach (var c in ch) c.Dispose();
         return (made, a);
-    }
-
-    // As before the strips (Dev.ArtStrips off)
-    (Mat gray, Mat alpha) WholeGrayAlpha()
-    {
-        using var raw = Cv2.ImRead(path, ImreadModes.Unchanged);
-        using var rgba = new Mat();
-        Cv2.CopyMakeBorder(raw, rgba, 0, Math.Max(0, padH - raw.Height), 0, Math.Max(0, padW - raw.Width), BorderTypes.Constant, Scalar.All(0));
-        var ch = rgba.Split();
-        var alpha = ch[3].Clone();
-        using var bgr3 = new Mat();
-        Cv2.Merge([ch[0], ch[1], ch[2]], bgr3);
-        using var g = new Mat();
-        Cv2.CvtColor(bgr3, g, ColorConversionCodes.BGR2GRAY);
-        var gray = new Mat();
-        // a = alpha/255; gray = g * a + bg * (1 - a), bg ~ the map panel's near-black
-        using var a = new Mat();
-        alpha.ConvertTo(a, MatType.CV_32F, 1 / 255.0);
-        using var gf = new Mat();
-        g.ConvertTo(gf, MatType.CV_32F);
-        Cv2.Subtract(gf, new Scalar(20), gf);
-        Cv2.Multiply(gf, a, gf);
-        Cv2.Add(gf, new Scalar(20), gf);
-        gf.ConvertTo(gray, MatType.CV_8U);
-        foreach (var c in ch) c.Dispose();
-        return (gray, alpha);
-    }
-
-    Mat WholeBgr()
-    {
-        using var raw = Cv2.ImRead(path, ImreadModes.Unchanged);
-        using var rgba = new Mat();
-        Cv2.CopyMakeBorder(raw, rgba, 0, Math.Max(0, padH - raw.Height), 0, Math.Max(0, padW - raw.Width), BorderTypes.Constant, Scalar.All(0));
-        var ch = rgba.Split();
-        using var a = new Mat();
-        ch[3].ConvertTo(a, MatType.CV_32F, 1 / 255.0);
-        var outCh = new Mat[3];
-        for (int i = 0; i < 3; i++)
-        {
-            using var f = new Mat();
-            ch[i].ConvertTo(f, MatType.CV_32F);
-            Cv2.Subtract(f, new Scalar(20), f);
-            Cv2.Multiply(f, a, f);
-            Cv2.Add(f, new Scalar(20), f);
-            outCh[i] = new Mat();
-            f.ConvertTo(outCh[i], MatType.CV_8U);
-        }
-        var m = new Mat();
-        Cv2.Merge(outCh, m);
-        foreach (var c in ch) c.Dispose();
-        foreach (var c in outCh) c.Dispose();
-        return m;
     }
 
     Mat ReadPadded()
@@ -195,7 +143,6 @@ public sealed class MapArt : IDisposable
 
     Mat MakeBgr()
     {
-        if (!Dev.ArtStrips) return WholeBgr();
         using var rgba = ReadPadded();
         var ch = rgba.Split();
         var outCh = new Mat[3];
@@ -656,23 +603,24 @@ public sealed class MinimapTracker(MapArtCache arts)
     });
 
     /// <summary>The engine's own tracker, the one that follows the player through a run (the others only try layouts out for a
-    /// moment): the one Dev switch art-window keeps windows for, and the one Dev switch dev-stats counts.</summary>
+    /// moment): the one whose windows are kept between fixes, and the one Dev switch dev-stats counts.</summary>
     public bool Main { get; init; }
 
-    // ---- Dev switch art-window: the map's side of a match is two transforms of the window looked at, and that window only moves
-    // when the player has moved a whole pixel of it. While it is the same window of the same map as at the last fix, they are kept.
+    // ---- The map's side of a match is two transforms of the window looked at, and that window only moves when the player has
+    // moved a whole pixel of it. While it is the same window of the same map as at the last fix, they are kept instead of made
+    // again. One per floor, near-or-wide and scale, so a search over several scales doesn't replace the window at each scale.
     // (The maps are made once and never drawn on: the same Mat is the same picture. Only the engine's thread matches; the lock
     // is for the maps being let go of from another thread meanwhile.)
-    readonly Dictionary<(int floor, bool near), (Mat map, Rect roi, MatchImage image)> windows = new();
+    readonly Dictionary<(int floor, bool near, double s), (Mat map, Rect roi, MatchImage image)> windows = new();
     // Kept only for the windows of a player being followed (about 350 px across, 1 MB kept): a search over a whole map would
     // keep tens of MB for one use.
     const int KeptWindowPx = 600 * 600;
 
-    /// <summary>match.Match(the part `roi` of `map`, res). With the switch on, that part's transforms are the ones kept from the
-    /// last fix when it is the same part of the same picture: the same numbers go in, so the same numbers come out.</summary>
-    void MatchWindow(MaskedTemplate match, Mat map, Rect roi, int floor, bool near, Mat res)
+    /// <summary>match.Match(the part `roi` of `map`, res). That part's transforms are the ones kept from the last fix when it is
+    /// the same part of the same picture: the same numbers go in, so the same numbers come out.</summary>
+    void MatchWindow(MaskedTemplate match, Mat map, Rect roi, int floor, bool near, double s, Mat res)
     {
-        if (!Dev.ArtWindow || !Main || MaskedTemplate.Reference || roi.Width * roi.Height > KeptWindowPx)
+        if (!Main || MaskedTemplate.Reference || roi.Width * roi.Height > KeptWindowPx)
         {
             using var sub = new Mat(map, roi);
             match.Match(sub, res);
@@ -681,19 +629,18 @@ public sealed class MinimapTracker(MapArtCache arts)
         Tally.Add(Tally.N.Window);
         lock (windows)
         {
-            if (windows.TryGetValue((floor, near), out var w) && ReferenceEquals(w.map, map) && w.roi == roi) Tally.Add(Tally.N.WindowKept);
+            if (windows.TryGetValue((floor, near, s), out var w) && ReferenceEquals(w.map, map) && w.roi == roi) Tally.Add(Tally.N.WindowKept);
             else
             {
-                if (w.image != null) { windows.Remove((floor, near)); w.image.Dispose(); }
+                if (w.image != null) { windows.Remove((floor, near, s)); w.image.Dispose(); }
                 using var sub = new Mat(map, roi);
-                windows[(floor, near)] = w = (map, roi, new MatchImage(sub));
+                windows[(floor, near, s)] = w = (map, roi, new MatchImage(sub));
             }
             match.Match(w.image, res);
         }
     }
 
-    /// <summary>What Dev switch art-window kept goes (the maps were let go of, or the switch was turned off again). Nothing to do
-    /// when it never kept anything.</summary>
+    /// <summary>The kept windows go (the maps were let go of). Nothing to do when none were kept.</summary>
     void DropWindows()
     {
         lock (windows)
@@ -708,8 +655,6 @@ public sealed class MinimapTracker(MapArtCache arts)
     public Point2d? Locate(Mat minimapBgr, Layout layout, double uiScale, DateTime? pictureAt = null)
     {
         if (minimapBgr.Width < 40) return null;
-        // (Dev switch art-window turned off again: what it kept goes.)
-        if (!Dev.ArtWindow && windows.Count > 0) DropWindows();
         if (Main) Tally.Add(Tally.N.Fix);
         var found = Fix(minimapBgr, layout, uiScale, pictureAt);
         if (Main && found == null) Tally.Add(Tally.N.FixNone);
@@ -836,7 +781,7 @@ public sealed class MinimapTracker(MapArtCache arts)
                     2 * near + tpl.Width, 2 * near + tpl.Height).Intersect(roi);
                 if (close.Width > tpl.Width + 2 && close.Height > tpl.Height + 2)
                 {
-                    MatchWindow(match, map, close, fl, true, res);
+                    MatchWindow(match, map, close, fl, true, s, res);
                     Cv2.PatchNaNs(res, -1);
                     Cv2.Threshold(res, res, 1.0, 0, ThresholdTypes.TozeroInv);
                     Cv2.Max(res, new Scalar(-1), res);
@@ -857,7 +802,7 @@ public sealed class MinimapTracker(MapArtCache arts)
             if (!settled)
             {
                 if (roi.Width <= tpl.Width || roi.Height <= tpl.Height) continue;
-                MatchWindow(match, map, roi, fl, false, res);
+                MatchWindow(match, map, roi, fl, false, s, res);
                 // Flat windows divide by ~0 and give NaN/±Inf: treat them as no match.
                 Cv2.PatchNaNs(res, -1);
                 Cv2.Threshold(res, res, 1.0, 0, ThresholdTypes.TozeroInv);
@@ -1218,7 +1163,7 @@ public sealed class FloorRefiner(MapArtCache arts)
     {
         Later.Dispose(Later.Take(artFloor, k => keep(k.Item1)));
         // The last frame's prepared template, whichever layout it was for.
-        if (Dev.RefinerTrim && prep != null) { Later.Dispose(new List<Prepared> { prep }); prep = null; prepFor = null; }
+        if (prep != null) { Later.Dispose(new List<Prepared> { prep }); prep = null; prepFor = null; }
     }
     /// <summary>Floor the full map is showing: 0 ground, 1+ upstairs.</summary>
     public int Floor { get; private set; }
@@ -1804,9 +1749,8 @@ public sealed class HeadingDetector
         if (conePx == null || conePx.Length < len) conePx = new byte[len];
         var px = conePx;
         System.Runtime.InteropServices.Marshal.Copy(hsv.Data, px, 0, len);   // (a new Mat is continuous)
-        bool reuse = Dev.ConeArcs;
-        var sum = reuse ? ConeBuf(bins == 360 ? 0 : 1, bins, true) : new double[bins];
-        var n = reuse ? ConeCounts(bins) : new int[bins];
+        var sum = ConeBuf(bins == 360 ? 0 : 1, bins, true);
+        var n = ConeCounts(bins);
         for (int i = 0; i < lut.Length; i++)
         {
             int b = lut[i];
@@ -1816,12 +1760,12 @@ public sealed class HeadingDetector
             if (sat < 50 && val > 205) sum[b] += Math.Min(1, (val - 205) / 35.0);
             n[b]++;
         }
-        var prof = reuse ? ConeBuf(bins == 360 ? 2 : 3, bins, false) : new double[bins];
+        var prof = ConeBuf(bins == 360 ? 2 : 3, bins, false);
         for (int i = 0; i < bins; i++) prof[i] = n[i] > 0 ? sum[i] / n[i] : 0;
         return prof;
     }
 
-    // The cone's arrays, kept per thread with Dev.ConeArcs (about 15 KB new ~60 times a second).
+    // The cone's arrays, kept per thread (they were about 15 KB new ~60 times a second).
     [ThreadStatic] static double[][]? coneBufs;
     [ThreadStatic] static int[]? coneCounts360, coneCounts90;
     static double[] ConeBuf(int slot, int len, bool clear)
@@ -1846,18 +1790,9 @@ public sealed class HeadingDetector
     {
         int bins = prof.Length, best = 0;
         bestSum = -1;
-        if (!Dev.ConeArcs)
-        {
-            for (int i = 0; i < bins; i++)
-            {
-                double t = 0;
-                for (int j = 0; j < win; j++) t += prof[(i + j) % bins];
-                if (t > bestSum) { bestSum = t; best = i; }
-            }
-            return best;
-        }
-        // Each arc's sum from the last one's. That builds up rounding, which could pick another of arcs that are really equal, so
-        // only those within a hair of the top are summed afresh, as above: the same arc, and the same sum, as above.
+        // Each arc's sum from the last one's, instead of adding up every arc. That builds up rounding, which could pick another of
+        // arcs that are really equal, so only those within a hair of the top are summed afresh: the same arc, and the same sum, as
+        // adding up every arc gave.
         var sums = ConeBuf(bins == 360 ? 4 : 5, bins, false);
         double s = 0, top = double.MinValue;
         bool any = false;
@@ -1884,7 +1819,7 @@ public sealed class HeadingDetector
     static double Outside(double[] prof, int best, int win)
     {
         int bins = prof.Length;
-        var rest = Dev.ConeArcs ? ConeBuf(bins == 360 ? 6 : 7, bins - win, false) : new double[bins - win];
+        var rest = ConeBuf(bins == 360 ? 6 : 7, bins - win, false);
         int k = 0;
         for (int i = 0; i < bins; i++) if (((i - best) % bins + bins) % bins >= win) rest[k++] = prof[i];
         Array.Sort(rest);
@@ -1907,7 +1842,7 @@ public sealed class HeadingDetector
         Cv2.Resize(minimapBgr, small, new Size(), k, k, InterpolationFlags.Area);
         const int Bins = 360;
         var raw = ConeProfile(small, Bins);
-        var prof = Dev.ConeArcs ? (coneSmooth ??= new double[Bins]) : new double[Bins];   // lightly smoothed (5 deg), so single pixels don't make edges
+        var prof = coneSmooth ??= new double[Bins];   // lightly smoothed (5 deg), so single pixels don't make edges
         for (int i = 0; i < Bins; i++)
         {
             double t = 0;
@@ -1923,7 +1858,7 @@ public sealed class HeadingDetector
         if (inside < 0.25 || inside < outside * 2 + 0.1) return null;
         // the edges: from the arc's middle, outwards until the profile falls below half-way between the cone's
         // plateau and the floor around it (with sub-degree interpolation)
-        var arc = Dev.ConeArcs ? (coneArc ??= new double[Win]) : new double[Win];
+        var arc = coneArc ??= new double[Win];
         for (int j = 0; j < Win; j++) arc[j] = prof[(best + j) % Bins];
         Array.Sort(arc);
         double plateau = arc[(int)(arc.Length * 0.75)];

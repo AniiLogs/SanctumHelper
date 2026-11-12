@@ -99,8 +99,9 @@ public static class Lang
         {
             using var key = Registry.CurrentUser.OpenSubKey(@"Software\Aniimo\Aniimo");
             if (key == null) return null;
-            // (Unity keeps all of the game's preferences here: listing them each time is the cost, and this value's name doesn't change.)
-            object? held = Dev.LangCache && languageValue != null ? key.GetValue(languageValue) : null;
+            // The value's name is remembered: Unity keeps all of the game's preferences here, listing them each time is the cost,
+            // and this value's name doesn't change. If it goes, they're listed again.
+            object? held = languageValue != null ? key.GetValue(languageValue) : null;
             if (held == null)
             {
                 var name = key.GetValueNames().FirstOrDefault(n => n.Contains("_language_h", StringComparison.OrdinalIgnoreCase)

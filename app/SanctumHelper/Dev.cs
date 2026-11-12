@@ -7,8 +7,9 @@ namespace SanctumHelper;
 /// <summary>Beta-only test switches, shown on the Dev tab of aLogs' Sanctum Helper page. Each one turns on a proposed change, so it
 /// can be tried alone. All off at every start, on purpose: a build can change what a switch does. The one exception is a switch a
 /// tester made persistent (dev-persistent.json): that starts on, through updates, until they undo it or its Revision is raised.
-/// Persistent says nothing about what goes into a release. With them all off, Sanctum Helper works as it did in 0.1.36. Before a
-/// real release, the ones chosen become normal behaviour and the rest, with this file, come out.</summary>
+/// Persistent says nothing about what goes into a release. With them all off, Sanctum Helper works as it did in 0.1.36, plus the
+/// tested ones already made normal behaviour. Before a real release, the ones chosen become normal behaviour and the rest, with
+/// this file, come out.</summary>
 public static class Dev
 {
     public const string NoRisk = "No known risk", LowRisk = "Low risk", HighRisk = "High risk";
@@ -16,35 +17,20 @@ public static class Dev
     public sealed record Option(string Id, string Section, string Area, string Title, string What, string Gain, string Risk, string Tested, Action<bool> Set, int Revision = 0);
 
     // Read every frame or fix from several threads; a plain field read is all that's needed.
-    public static bool ArtStrips, GcThread, DuplicateTick, LabelCache,
-        IslandTile, IslandFastMatch, IslandNear, SanctumNear, FloorHere, WideThrottle, IslandArtThread, ArrivalSlow, TimerNearby,
+    public static bool IslandTile, IslandFastMatch, IslandNear, SanctumNear, FloorHere, WideThrottle, IslandArtThread, ArrivalSlow, TimerNearby,
         RedrawSkip, GlideReset, MisfitFix, OldPanFix, LogLayout, LogIsland, LogCandidates, ExactZoom, MinimapBox, ReleaseOnLock,
         CornerMargin, MarkerCoast,
         ChallengeAsync, SkipRepeat, ArrowRetry, StaleSearch, HostedIo, HanningCache, ResizeSkip, EscNearby, WiderDisc,
         LazyArt, FreeIdle, GrabTime, PictureAge, LogThread,
-        RefinerTrim, ConeArcs, IslandShrinkOnce, LangCache, HostedScan, CompactMasks, ConeCheck, FloorRooms, BossRooms, DecodeThread, FasterArrow, RetainedMap,
-        ExitSameDoor, ConeLog, RedrawCap, Facing30, Track20, OneWorker, RockLog, ArtWindow, Stats, ChestRooms, ChestSearch;
+        HostedScan, CompactMasks, ConeCheck, FloorRooms, BossRooms, DecodeThread, FasterArrow, RetainedMap,
+        ExitSameDoor, ConeLog, RedrawCap, Facing30, Track20, OneWorker, RockLog, Stats, ChestRooms, ChestSearch;
 
     const string Bench = "Bench tested", Compared = "Compared with the old pictures", Log = "Checked against a real game log", Untested = "Not tested yet";
 
     public static readonly IReadOnlyList<Option> Options =
     [
-        new("art-strips", NoRisk, "Memory", "Load maps in strips", "Loads map images a strip at a time. Takes effect on the next map loaded.",
-            "Island map load 827 to 445 ms; peak while loading all maps 722 to 482 MB.", "None found: all 51 images came out identical.", Bench, v => ArtStrips = v),
-        new("gc-thread", NoRisk, "Smoothness", "Clean up memory off the tracking loop", "Frees memory on another thread, so tracking isn't held up meanwhile.",
-            "Removes a pause; size unknown.", "None found.", Untested, v => GcThread = v),
-        new("duplicate-tick", NoRisk, "CPU", "Ignore repeated display ticks", "The display clock can tick twice for one frame: the second is skipped.",
-            "Unknown; may be nothing on some screens.", "None found.", Untested, v => DuplicateTick = v),
-        new("label-cache", NoRisk, "CPU", "Build labels once", "Text on the map is laid out once instead of every frame.",
-            "Unknown; probably the costliest part of a frame.", "Up to 16 pixels differ slightly, too little to see.", Compared, v => LabelCache = v),
-        new("refiner-trim", NoRisk, "Memory", "Free the full map's last template", "When maps are let go of, the last full-map template they matched goes too.",
-            "A few MB after a run, until the next full map.", "None found.", Bench, v => RefinerTrim = v),
-        new("cone-arcs", NoRisk, "CPU", "Faster view cone search", "Finds the view cone's brightest arc by sliding along it instead of adding up every arc, and keeps its arrays.",
-            "Cone reads 0.10 to 0.06 ms, and 13 KB to 0.6 KB of new memory each.", "None found: all 900 simulated minimaps gave identical answers.", Bench, v => ConeArcs = v),
         new("rock-log", NoRisk, "Accuracy", "Note the rocks the game names at each arrival", "After each area loads in an Egg Heist run, the game's own log names the rocks and props near the player. This writes those names to rocks.txt next to the helper's log, with the position the helper then settles on. Nothing shown changes and nothing reads it back yet.",
             "None yet: enough runs of this make a table of which rocks mean which landing or door, so an arrival could be placed from the game's log instead of from the screen.", "None found; a few short lines a run.", Untested, v => RockLog = v),
-        new("art-window", NoRisk, "CPU", "Sanctum: keep the map's side of a match", "Each position fix compares the minimap with a window of the map around you. That window only moves when you have moved a whole pixel of it, so while it is the same window, the part of the work done on the map is kept from the last fix instead of done again.",
-            "On simulated walks: Sanctum reads about 4.7 to 3.9 ms standing still, 4.7 to 4.5 at a slow walk, nothing at a run. Nothing on the island.", "None found: every window kept on the simulated walks was the same as a fresh one, number for number (over 50,000 checked), so the same position comes out. No real run was tried.", Bench, v => ArtWindow = v),
         new("dev-stats", NoRisk, "Accuracy", "Count what the readers did, once a minute", "Once a minute the log gets one line of counts and timings: pictures taken or skipped, position fixes and how many were lost, coasted or jumped, how often a look-nearby switch settled it, run timer and Esc button checks, and redraws. Nothing shown changes. Leave it on with and without another switch to compare the two.",
             "Shows from a log alone what a switch saved and whether it cost any reads.", "None found; one more log line a minute.", Untested, v => { Stats = v; Tally.Reset(); }),
         new("redraw-cap", LowRisk, "CPU", "Redraw the Corner map at most 60 times a second", "On a 120 Hz or faster screen the map was redrawn on every screen frame while you move or turn. With this on, every other frame is skipped.",
@@ -57,10 +43,6 @@ public static class Dev
             "Unknown; no more short bursts on four cores at the same moment as the game.", "Naming a layout from the minimap and finding yourself on the whole island may take longer.", Untested, v => { OneWorker = v; try { OpenCvSharp.Cv2.SetNumThreads(v ? 1 : 4); } catch { /* no OpenCV in this mode */ } }),
         new("cone-log", NoRisk, "Accuracy", "Say how the view cone reads went", "Every 5 s in a run, the log says how many view cone reads were kept or dropped, how sure they were, how often the cone leapt, and how far the drawn cone sits from the latest reading. Nothing shown changes.",
             "Shows whether the view cone is right, and which cone switch helps, from a real run.", "None found; one more log line every 5 s in a run.", Untested, v => ConeLog = v),
-        new("island-shrink-once", NoRisk, "CPU", "Island: scale the minimap once", "Two island checks each scaled the same picture: they share one now.",
-            "One copy of the minimap less per island read: small at 1080p, more at 4K.", "None found.", Untested, v => IslandShrinkOnce = v),
-        new("lang-cache", NoRisk, "CPU", "Game language: remember where it's kept", "The check every 5 s reads the one setting instead of listing all the game's settings first.",
-            "Small; once every 5 s.", "None found: if that setting goes, they're listed again.", Untested, v => LangCache = v),
 
         new("log-layout", LowRisk, "Accuracy", "Layout from the game's log", "The game's log names the Sanctum as it loads: used instead of working it out from pictures. Starts with the next Sanctum.",
             "Right at once, instead of 17-46 s, and no wrong layout (one run had the wrong one for about 4 minutes).", "If the log were ever wrong, it wouldn't correct itself until the run ended (not seen in 9 of 9). A patch could remove the line: then it works as with this off.", Log, v => LogLayout = v),
