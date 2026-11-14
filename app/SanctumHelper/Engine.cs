@@ -2085,6 +2085,11 @@ public sealed class Engine : IDisposable
         // holds (checked again every 1.5 s); while they move at the same zoom (a pan), the fit moves with
         // them; once they stop somewhere new, or the zoom changes, a new fit is made.
         bool reused = false;
+        // a pan / one-door guess the floor fit didn't confirm doesn't place the player: seeded every frame while the map is
+        // open, it put the player where the guess was (one at the last pose's zoom, 0.63 for a map at 1.07), and after the
+        // map closed the corner map only searched near that wrong spot and lost them (14 Nov, the owner: it loses its
+        // position after leaving the map)
+        bool seedOk = true;
         var doorO = doors.LastOrange;
         if (src == "doors" && fit != null && fit.Layout.Number == doorPose!.Layout.Number
             && doorO is Point2d o && doors.LastBlue is Point2d bl && fitO is Point2d fo && fitB is Point2d fb)
@@ -2117,7 +2122,7 @@ public sealed class Engine : IDisposable
                 if (sure) { fit = refined; fitO = doors.LastOrange; fitB = doors.LastBlue; fitAt = clock.ElapsedMilliseconds; }
             }
             else if (sure) { pose = doorPose; fit = null; LastMatchInfo += $" | doors only ({refiner.LastInfo})"; }
-            else if (src is "pan" or "one door") { pose = guess; LastMatchInfo += $" | {src} only ({refiner.LastInfo})"; }
+            else if (src is "pan" or "one door") { pose = guess; seedOk = false; LastMatchInfo += $" | {src} only ({refiner.LastInfo})"; }
             else LastMatchInfo += $" | lost ({refiner.LastInfo})";
         }
         if (pose == null && doors.LastMapOpen && cands.Count == 1)
@@ -2133,7 +2138,7 @@ public sealed class Engine : IDisposable
         }
         if (logMatch)
             Log.Write($"map: {(pose == null ? "no match" : $"{pose.Layout.Title} scale {pose.Scale:0.000}")} | {LastMatchInfo} | candidates {string.Join(",", cands.Select(x => x.Number))}");
-        if (pose != null && arrow is Point2d a && pose.Inliers >= 30)
+        if (pose != null && seedOk && arrow is Point2d a && pose.Inliers >= 30)
         {
             // The yellow arrow on the full map is the most exact player position there is.
             player = new Point2d((a.X - pose.Tx) / pose.Scale, (a.Y - pose.Ty) / pose.Scale);
