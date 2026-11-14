@@ -70,7 +70,7 @@ public partial class App : Application
             // Developer check of placement mode without the engine (works beside a running copy).
             var ps = Settings.Load();
             var pov = new OverlayWindow(LayoutDb.Load(Path.Combine(AppContext.BaseDirectory, "Assets")), ps);
-            pov.Show();
+            pov.Open();
             pov.PlacementEnded += Shutdown;
             Dispatcher.BeginInvoke(pov.BeginPlacement, System.Windows.Threading.DispatcherPriority.ApplicationIdle);
             return;
@@ -159,7 +159,7 @@ public partial class App : Application
         hook = new KeyHook(settings.HoldKey);
         overlay = new OverlayWindow(db, settings);
         // (the notification window is made once the engine exists, below)
-        overlay.Show();
+        overlay.Open();   // (Open: the Dev switch overlay-direct-window shows its own window instead, 14 Nov)
         engine = new Engine(db, settings, hook);
         engine.Frame += f => Dispatcher.BeginInvoke(() => overlay.Apply(f));
         engine.StatusChanged += () => Dispatcher.BeginInvoke(UpdateTray);

@@ -156,8 +156,10 @@ public sealed class Engine : IDisposable
 
     /// <summary>Is this an Egg Heist area? With the game's log readable, only while it has the player on the island or
     /// in a Sanctum: the maps used to pop up elsewhere when something on screen passed for the run timer or the island
-    /// map. A layout picked by hand always shows; without the log, the screen decides as before.</summary>
-    bool InEggHeist => settings.ForcedLayout != 0 || !(settings.UseGameLog && gameLog.Available)
+    /// map. A layout picked by hand is still the one used, but only there too (14 Nov, the aLogs owner's call: it made
+    /// every Egg Heist check true everywhere, the key's screen grabs and minimap tracking out in the world included);
+    /// without the log, the screen decides as before.</summary>
+    bool InEggHeist => !(settings.UseGameLog && gameLog.Available)
         || gameLog.Where is GameLog.Place.Island or GameLog.Place.Sanctum;
 
     /// <summary>Every overlay frame goes out here: nothing is shown outside Egg Heist (see InEggHeist).</summary>
@@ -534,7 +536,9 @@ public sealed class Engine : IDisposable
                 }
                 // The run's maps go once you've left, whatever is in front: what lets them go below runs only in Egg Heist, so out of it they stayed for good,
                 // adding up run after run (8 Nov: 1.6 GB held for half an hour between runs, 100 MB without them).
-                if (!InEggHeist && settings.ForcedLayout == 0 && (CurrentLayout != null || arts.Loaded > 0) && !resetRequested
+                // (With a layout picked by hand too, now that it no longer counts as Egg Heist everywhere: it stays picked,
+                // only its art is loaded again in the next run, 14 Nov, the aLogs owner's call.)
+                if (!InEggHeist && (CurrentLayout != null || arts.Loaded > 0) && !resetRequested
                     && (DateTime.UtcNow - lastRunSeen).TotalSeconds > 90)
                 {
                     Log.Write("out of Egg Heist for 90 s: letting the run's maps go");
@@ -1640,7 +1644,9 @@ public sealed class Engine : IDisposable
 
     void CheckChallenge(Mat small, DateTime now)
     {
-        if (settings.ForcedLayout != 0 || !ocr.Available || gameLog.Where != GameLog.Place.Island || gameLog.RunId == null) return;
+        // (A layout picked by hand no longer skips this: it only shows in Egg Heist now, and a challenge isn't, 14 Nov,
+        // the aLogs owner's call.)
+        if (!ocr.Available || gameLog.Where != GameLog.Place.Island || gameLog.RunId == null) return;
         if (challengeArea != gameLog.RunId) { challengeArea = gameLog.RunId; challengeAreaAt = now; nextChallengeRead = now; }
         if (challengeRead != null)
         {
