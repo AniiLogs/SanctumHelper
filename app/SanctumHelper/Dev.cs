@@ -23,7 +23,7 @@ public static class Dev
         ChallengeAsync, SkipRepeat, ArrowRetry, StaleSearch, HostedIo, HanningCache, ResizeSkip, EscNearby, WiderDisc,
         LazyArt, FreeIdle, GrabTime, PictureAge, LogThread,
         HostedScan, CompactMasks, ConeCheck, FloorRooms, BossRooms, DecodeThread, FasterArrow, RetainedMap,
-        ConeLog, Facing30, Track20, OneWorker, RockLog, Stats, ChestRooms, ChestSearch;
+        ConeLog, Facing30, Track20, OneWorker, RockLog, Stats, ChestRooms, ChestSearch, DirectWindow;
     // normal behaviour since 0.1.37 B8 (the owner, 14 Nov): out of a Sanctum by the door you went in by, all ten doors looked at
     // (it was the Dev switch exit-same-door; 11 of 19 exits in players' logs were placed on a weak blue-door match)
     public static bool ExitSameDoor = true;
@@ -138,6 +138,10 @@ public static class Dev
             "21% fewer pixels copied each frame at 1080p.", "A long caption could get clipped.", Untested, v => CornerMargin = v),
         new("marker-coast", HighRisk, "Smoothness", "Keep the marker moving after a missed read", "One missed read no longer pulls the marker back.",
             "Removes a pull-back of about 2.5 screen pixels.", "It may coast up to 0.15 s after you really stop.", Untested, v => MarkerCoast = v),
+        // (14 Nov, the aLogs owner's call: the see-through window's copy back to the CPU on every redraw. Read once, when the
+        // overlay is made: see DirectHost in OverlayWindow.cs.)
+        new("overlay-direct-window", HighRisk, "CPU", "Draw the map without copying it back", "The map's see-through window is made another way: Windows mixes it over the game straight from the graphics card, instead of each redraw being copied back to the CPU first. Still click-through, on top, and in or out of recordings as set. Only read when Sanctum Helper starts: make it Persistent, then restart Sanctum Helper (turning it off works the same way).",
+            "Unknown; each redraw was a copy of the whole window, about 33 MB at 4K with the in-game map open, far less around a small map.", "A new kind of window: if the graphics driver doesn't mix it right, the map could show over black or not at all (turn it off and restart). While placing the mini map, the game can't be clicked around it.", Untested, v => DirectWindow = v),
     ];
 
     /// <summary>Turns one on or off; false if there's no such switch.</summary>

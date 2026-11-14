@@ -21,6 +21,11 @@ public sealed class OverlayWindow : Window
     OpenCvSharp.Rect placed;
     long lastTopmost;
     OverlayFrame? live;
+    // Dev switch overlay-direct-window, as it was when this window was made: the map in a window of our own (DirectHost below),
+    // and this Window is never shown. Null: the Window itself, as before (14 Nov, the aLogs owner's call).
+    readonly DirectHost? host;
+    /// <summary>What takes the mouse in placement mode: this Window, or the direct window's root.</summary>
+    FrameworkElement Input => (FrameworkElement?)host?.Root ?? this;
 
     public OverlayWindow(LayoutDb db, Settings settings)
     {
@@ -35,7 +40,10 @@ public sealed class OverlayWindow : Window
         Left = -32000; Top = -32000; Width = 10; Height = 10;
         this.settings = settings;
         view = new OverlayView(db, settings);
-        Content = view;
+        if (Dev.DirectWindow)
+            try { host = new DirectHost(view); }
+            catch (Exception e) { Log.Write("overlay: no direct window, the usual one instead: " + e.Message); host = null; DirectHost.Let(view); }
+        if (host == null) Content = view;
         SourceInitialized += (_, _) =>
         {
             hwnd = new WindowInteropHelper(this).Handle;
@@ -44,6 +52,29 @@ public sealed class OverlayWindow : Window
             Native.SetWindowLongPtr(hwnd, Native.GWL_EXSTYLE, new IntPtr(ex));
             ApplyCaptureMode();
         };
+    }
+
+    /// <summary>Shows the overlay (still off screen and empty until the first frame places it).</summary>
+    public void Open()
+    {
+        if (host == null) { Show(); return; }
+        hwnd = host.Handle;
+        ApplyCaptureMode();
+        Log.Write("overlay: direct window (Dev switch overlay-direct-window)");
+    }
+
+    protected override void OnClosed(EventArgs e)
+    {
+        host?.Dispose();
+        base.OnClosed(e);
+    }
+
+    /// <summary>Moves the overlay (physical pixels), and the direct window's map with it.</summary>
+    void Move(OpenCvSharp.Rect r)
+    {
+        Native.SetWindowPos(hwnd, Native.HWND_TOPMOST, r.X, r.Y, r.Width, r.Height,
+            Native.SWP_NOACTIVATE | Native.SWP_SHOWWINDOW | Native.SWP_NOOWNERZORDER);
+        host?.Fit(r.Width, r.Height);
     }
 
     bool? excluded;
@@ -114,8 +145,7 @@ public sealed class OverlayWindow : Window
         {
             placed = want;
             // Physical pixels; the view undoes WPF's DPI scaling so it can draw in them too.
-            Native.SetWindowPos(hwnd, Native.HWND_TOPMOST, want.X, want.Y, want.Width, want.Height,
-                Native.SWP_NOACTIVATE | Native.SWP_SHOWWINDOW | Native.SWP_NOOWNERZORDER);
+            Move(want);
         }
         else if (f.Visible && Environment.TickCount64 - lastTopmost > 250)
         {
@@ -171,12 +201,12 @@ public sealed class OverlayWindow : Window
         SetClickThrough(false);
         view.Placing = true;
         view.Frame = live;
-        Cursor = System.Windows.Input.Cursors.SizeAll;
-        MouseLeftButtonDown += OnDown;
-        MouseMove += OnMove;
-        MouseLeftButtonUp += OnUp;
-        MouseWheel += OnWheel;
-        MouseRightButtonUp += OnRight;
+        Input.Cursor = System.Windows.Input.Cursors.SizeAll;
+        Input.MouseLeftButtonDown += OnDown;
+        Input.MouseMove += OnMove;
+        Input.MouseLeftButtonUp += OnUp;
+        Input.MouseWheel += OnWheel;
+        Input.MouseRightButtonUp += OnRight;
         // Keys held when placement starts (e.g. Enter on a menu) don't count until released.
         enterWasDown = (Native.GetAsyncKeyState(0x0D) & 0x8000) != 0;
         escWasDown = (Native.GetAsyncKeyState(0x1B) & 0x8000) != 0;
@@ -198,13 +228,13 @@ public sealed class OverlayWindow : Window
         if (!placing) return;
         placing = dragging = false;
         keys?.Stop(); keys = null;
-        ReleaseMouseCapture();
-        MouseLeftButtonDown -= OnDown;
-        MouseMove -= OnMove;
-        MouseLeftButtonUp -= OnUp;
-        MouseWheel -= OnWheel;
-        MouseRightButtonUp -= OnRight;
-        Cursor = null;
+        Input.ReleaseMouseCapture();
+        Input.MouseLeftButtonDown -= OnDown;
+        Input.MouseMove -= OnMove;
+        Input.MouseLeftButtonUp -= OnUp;
+        Input.MouseWheel -= OnWheel;
+        Input.MouseRightButtonUp -= OnRight;
+        Input.Cursor = null;
         if (!keep) { settings.MiniMapX = oldX; settings.MiniMapY = oldY; settings.MiniMapSize = oldSize; }
         else try { settings.Save(); } catch (Exception e) { Log.Write("save placement: " + e.Message); }
         view.Placing = false;
@@ -224,8 +254,7 @@ public sealed class OverlayWindow : Window
     void Cover(OpenCvSharp.Rect area)
     {
         view.PlacementClient = area;
-        Native.SetWindowPos(hwnd, Native.HWND_TOPMOST, area.X, area.Y, area.Width, area.Height,
-            Native.SWP_NOACTIVATE | Native.SWP_SHOWWINDOW | Native.SWP_NOOWNERZORDER);
+        Move(area);
     }
 
     static OpenCvSharp.Rect PrimaryScreen()
@@ -239,13 +268,19 @@ public sealed class OverlayWindow : Window
         long ex = (long)Native.GetWindowLongPtr(hwnd, Native.GWL_EXSTYLE);
         ex = on ? ex | Native.WS_EX_TRANSPARENT : ex & ~Native.WS_EX_TRANSPARENT;
         Native.SetWindowLongPtr(hwnd, Native.GWL_EXSTYLE, new IntPtr(ex));
+        // (The direct window's map is a child window: it lets the mouse through, or takes it, with its window.)
+        if (host != null)
+        {
+            long cex = (long)Native.GetWindowLongPtr(host.Child.Handle, Native.GWL_EXSTYLE);
+            Native.SetWindowLongPtr(host.Child.Handle, Native.GWL_EXSTYLE, new IntPtr(on ? cex | Native.WS_EX_TRANSPARENT : cex & ~Native.WS_EX_TRANSPARENT));
+        }
     }
 
     /// <summary>Mouse position in the view's drawing units (physical pixels).</summary>
     Point Phys(System.Windows.Input.MouseEventArgs e)
     {
         var p = e.GetPosition(view);
-        var dpi = VisualTreeHelper.GetDpi(this);
+        var dpi = VisualTreeHelper.GetDpi(Input);
         return new Point(p.X * dpi.DpiScaleX, p.Y * dpi.DpiScaleY);
     }
 
@@ -265,7 +300,7 @@ public sealed class OverlayWindow : Window
         dragging = true;
         dragFrom = p;
         dragStart = view.PanelRect;
-        CaptureMouse();
+        Input.CaptureMouse();
     }
 
     void OnMove(object sender, System.Windows.Input.MouseEventArgs e)
@@ -284,7 +319,7 @@ public sealed class OverlayWindow : Window
     void OnUp(object sender, System.Windows.Input.MouseButtonEventArgs e)
     {
         dragging = false;
-        ReleaseMouseCapture();
+        Input.ReleaseMouseCapture();
     }
 
     void OnWheel(object sender, System.Windows.Input.MouseWheelEventArgs e)
@@ -302,6 +337,89 @@ public sealed class OverlayWindow : Window
     }
 
     void OnRight(object sender, System.Windows.Input.MouseButtonEventArgs e) => EndPlacement(true);
+}
+
+/// <summary>Dev switch overlay-direct-window (14 Nov, the aLogs owner's call). A see-through WPF Window (AllowsTransparency) is shown
+/// through UpdateLayeredWindow: every redraw is copied from the graphics card back to the CPU, ~33 MB a redraw at 4K with the
+/// in-game map open. Here the overlay is a plain window of our own, layered and click-through as before (WS_EX_LAYERED |
+/// WS_EX_TRANSPARENT, one alpha for the whole window), with DWM's frame extended over all of it so the pixels' own alpha shows
+/// what's behind. The map is drawn by WPF as usual, in a child window that is not layered: WPF presents it straight from the
+/// graphics card, no copy back. Topmost, no activation, and SetWindowDisplayAffinity on this window as on the usual one.
+/// (Tried in a test program on 14 Nov: a half see-through red square blended right over the desktop, the clear part showed the
+/// desktop unchanged, a point under the square found the window behind, and WDA_EXCLUDEFROMCAPTURE left it out of a screen copy.)
+/// One difference: while placing the mini map, the whole window takes the mouse, not only where it draws.</summary>
+sealed class DirectHost : IDisposable
+{
+    const string ClassName = "SanctumHelperOverlay";
+    static Native.WndProc? proc;   // kept: the window class calls it for as long as the program runs
+    static bool registered;
+
+    public readonly IntPtr Handle;
+    public readonly HwndSource Child;
+    public readonly System.Windows.Controls.Grid Root;
+
+    public DirectHost(OverlayView view)
+    {
+        var instance = Native.GetModuleHandle(null);
+        if (!registered)
+        {
+            proc = WndProc;
+            var wc = new Native.WNDCLASSEX
+            {
+                cbSize = System.Runtime.InteropServices.Marshal.SizeOf<Native.WNDCLASSEX>(),
+                lpfnWndProc = System.Runtime.InteropServices.Marshal.GetFunctionPointerForDelegate(proc),
+                hInstance = instance, lpszClassName = ClassName,
+            };
+            if (Native.RegisterClassExW(ref wc) == 0) throw new System.ComponentModel.Win32Exception();
+            registered = true;
+        }
+        // Off screen and hidden until the first frame places it, as the usual window starts.
+        Handle = Native.CreateWindowExW(Native.WS_EX_LAYERED | Native.WS_EX_TRANSPARENT | Native.WS_EX_TOOLWINDOW | Native.WS_EX_NOACTIVATE | Native.WS_EX_TOPMOST,
+            ClassName, "Sanctum Helper overlay", Native.WS_POPUP, -32000, -32000, 10, 10, IntPtr.Zero, IntPtr.Zero, instance, IntPtr.Zero);
+        if (Handle == IntPtr.Zero) throw new System.ComponentModel.Win32Exception();
+        try
+        {
+            if (!Native.SetLayeredWindowAttributes(Handle, 0, 255, Native.LWA_ALPHA)) throw new System.ComponentModel.Win32Exception();
+            var all = new Native.MARGINS { Left = -1, Right = -1, Top = -1, Bottom = -1 };
+            int hr = Native.DwmExtendFrameIntoClientArea(Handle, ref all);
+            if (hr != 0) throw new InvalidOperationException($"DwmExtendFrameIntoClientArea 0x{hr:X8}");
+            Child = new HwndSource(new HwndSourceParameters("Sanctum Helper overlay map")
+            {
+                WindowStyle = unchecked((int)(Native.WS_CHILD | Native.WS_VISIBLE | Native.WS_CLIPSIBLINGS)),
+                ExtendedWindowStyle = (int)Native.WS_EX_TRANSPARENT,
+                ParentWindow = Handle, PositionX = 0, PositionY = 0, Width = 10, Height = 10,
+            });
+            Child.CompositionTarget.BackgroundColor = Colors.Transparent;
+            // (A clear background: placement mode's mouse events land here, as on the usual Window's.)
+            Root = new System.Windows.Controls.Grid { Background = Brushes.Transparent };
+            Root.Children.Add(view);
+            Child.RootVisual = Root;
+        }
+        catch
+        {
+            Native.DestroyWindow(Handle);
+            throw;
+        }
+    }
+
+    /// <summary>After a failed start: the view is let go, for the usual Window to hold.</summary>
+    public static void Let(OverlayView view)
+    {
+        if (VisualTreeHelper.GetParent(view) is System.Windows.Controls.Panel p) p.Children.Remove(view);
+    }
+
+    /// <summary>The map fills the window (physical pixels).</summary>
+    public void Fit(int width, int height) =>
+        Native.SetWindowPos(Child.Handle, IntPtr.Zero, 0, 0, width, height, Native.SWP_NOZORDER | Native.SWP_NOACTIVATE);
+
+    static IntPtr WndProc(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam) =>
+        msg == Native.WM_MOUSEACTIVATE ? new IntPtr(Native.MA_NOACTIVATE) : Native.DefWindowProcW(hWnd, msg, wParam, lParam);
+
+    public void Dispose()
+    {
+        Child.Dispose();
+        Native.DestroyWindow(Handle);
+    }
 }
 
 public sealed class OverlayView : FrameworkElement
