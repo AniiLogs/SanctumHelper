@@ -23,7 +23,7 @@ public static class Dev
         ChallengeAsync, SkipRepeat, ArrowRetry, StaleSearch, HostedIo, HanningCache, ResizeSkip, EscNearby, WiderDisc,
         LazyArt, FreeIdle, GrabTime, PictureAge, LogThread,
         HostedScan, CompactMasks, ConeCheck, FloorRooms, BossRooms, DecodeThread, FasterArrow, RetainedMap,
-        ConeLog, RedrawCap, Facing30, Track20, OneWorker, RockLog, Stats, ChestRooms, ChestSearch;
+        ConeLog, Facing30, Track20, OneWorker, RockLog, Stats, ChestRooms, ChestSearch;
     // normal behaviour since 0.1.37 B8 (the owner, 14 Nov): out of a Sanctum by the door you went in by, all ten doors looked at
     // (it was the Dev switch exit-same-door; 11 of 19 exits in players' logs were placed on a weak blue-door match)
     public static bool ExitSameDoor = true;
@@ -36,8 +36,6 @@ public static class Dev
             "None yet: enough runs of this make a table of which rocks mean which landing or door, so an arrival could be placed from the game's log instead of from the screen.", "None found; a few short lines a run.", Untested, v => RockLog = v),
         new("dev-stats", NoRisk, "Accuracy", "Count what the readers did, once a minute", "Once a minute the log gets one line of counts and timings: pictures taken or skipped, position fixes and how many were lost, coasted or jumped, how often a look-nearby switch settled it, run timer and Esc button checks, and redraws. Nothing shown changes. Leave it on with and without another switch to compare the two.",
             "Shows from a log alone what a switch saved and whether it cost any reads.", "None found; one more log line a minute.", Untested, v => { Stats = v; Tally.Reset(); }),
-        new("redraw-cap", LowRisk, "CPU", "Redraw the Corner map at most 60 times a second", "On a 120 Hz or faster screen the map was redrawn on every screen frame while you move or turn. With this on, every other frame is skipped.",
-            "Unknown; about half the drawing work while moving on a 120 Hz screen. Nothing on a 60 Hz one.", "The map's glide may look less smooth on a fast screen.", Untested, v => RedrawCap = v),
         new("facing-30", LowRisk, "CPU", "Read facing 30 times a second", "The arrow and view cone are read from the minimap 30 times a second instead of 60, and the picture of the corner is asked for half as often. The map still turns smoothly between reads.",
             "Unknown; half the corner pictures taken from the game's screen, and half the arrow and cone reads.", "The arrow and cone may trail a fast camera turn by a few degrees more.", Untested, v => Facing30 = v),
         new("track-20", LowRisk, "CPU", "Fix the position 20 times a second", "The position is worked out from the minimap 20 times a second instead of about 40. The map still glides between fixes.",

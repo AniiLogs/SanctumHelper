@@ -51,6 +51,10 @@ public sealed class Settings
 
     /// <summary>Overlay visible in recordings/screenshots (reads the game window directly).</summary>
     public bool RecordableOverlay { get; set; } = true;
+    /// <summary>Set by aLogs (General Settings › Performance, "Corner map redraws"): on a 120 Hz or faster screen the
+    /// Corner map is redrawn at most about 80 times a second while you move or turn, not on every screen frame. It was
+    /// the Dev switch redraw-cap (14 Nov: a 240 Hz screen can redraw it up to 240 times a second).</summary>
+    public bool RedrawCap { get; set; } = false;
 
     // On-screen map while the full map is closed: one of OverlayView.MiniMapStyles ("Corner",
     // "Disc", "Radar", "Compass", "Overlay" (Diablo-style) or "Off").
