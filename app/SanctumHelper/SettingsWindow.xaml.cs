@@ -199,7 +199,7 @@ public partial class SettingsWindow : Window
         statusTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
         statusTimer.Tick += (_, _) => RefreshStatus();
         statusTimer.Start();
-        Closed += (_, _) => { hook.AnyKeyPressed -= OnAnyKey; statusTimer.Stop(); };
+        Closed += (_, _) => { hook.AnyKeyPressed -= OnAnyKey; statusTimer.Stop(); if (capturingKey) hook.Capturing = false; };
 
         var v = typeof(App).Assembly.GetName().Version;
         About.Text = Lang.F("Version {0}  ·  map data from game build {1}  ·  OCR: {2}", v?.ToString(3) ?? "", db.GameDataVersion, engine.OcrLanguage) + "\n\n" +
@@ -346,6 +346,7 @@ public partial class SettingsWindow : Window
     {
         if (capturingKey) return;
         capturingKey = true;
+        hook.Capturing = true;   // a mouse button can be the key: the mouse is watched meanwhile (14 Nov)
         KeyName.Text = Lang.T("Press a key…");
         KeyButton.BorderBrush = (Brush)FindResource("Accent");
     }
@@ -353,6 +354,7 @@ public partial class SettingsWindow : Window
     void EndCapture()
     {
         capturingKey = false;
+        hook.Capturing = false;
         KeyName.Text = KeyHook.Name(s.HoldKey);
         HowKey.Text = KeyName.Text;
         KeyButton.ClearValue(BorderBrushProperty);

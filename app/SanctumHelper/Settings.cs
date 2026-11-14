@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Text.Json;
 using Microsoft.Win32;
 
@@ -106,6 +107,8 @@ public sealed class Settings
     static readonly JsonSerializerOptions Json = new() { WriteIndented = true };
     /// <summary>The settings file as this process last read or wrote it (hosted mode ignores its own saves).</summary>
     public static string? LastJson { get; private set; }
+    /// <summary>The file as the settings in memory last matched it (read, or written whole): what a save merges against.</summary>
+    static string? BaseJson;
 
     public static Settings Load()
     {
@@ -114,7 +117,7 @@ public sealed class Settings
             if (File.Exists(FilePath))
             {
                 var json = File.ReadAllText(FilePath);
-                LastJson = json;
+                LastJson = BaseJson = json;
                 var loaded = JsonSerializer.Deserialize<Settings>(json) ?? new Settings();
                 if (!json.Contains("\"Version\"")) loaded.Version = 1;
                 // v1 defaulted to Caps Lock, which flips caps every press: move to Left Ctrl.
@@ -143,13 +146,48 @@ public sealed class Settings
         lock (saving)
         {
             var json = JsonSerializer.Serialize(this, Json);
-            LastJson = json;
+            // aLogs writes this file too (its General Settings: WindowTitle, RecordableOverlay, RedrawCap; and the Sanctum page's
+            // options), and this reloads it a moment later. A save of ours in between wrote everything back as it was here, so
+            // what aLogs had just changed was lost. Now a setting that wasn't changed here since the file was last read keeps
+            // what the file has now (14 Nov).
+            var merged = MergeOnDisk();
+            if (merged != null) json = merged;
+            // Merged: the file holds a change this process hasn't taken in yet, so it isn't "our own save" (hosted mode reloads it).
+            LastJson = merged != null ? null : json;
+            if (merged == null) BaseJson = json;
             var tmp = FilePath + ".tmp";
             File.WriteAllText(tmp, json);
             File.Move(tmp, FilePath, true);
         }
         // Hosted by the aLogs app, which starts with Windows itself.
         if (!Hosted.Active) ApplyStartup();
+    }
+
+    /// <summary>The settings to write with what changed in the file since it was last read (by aLogs) kept where nothing here
+    /// changed that setting; null when nothing like that changed (then they're written as they are, as always).</summary>
+    string? MergeOnDisk()
+    {
+        try
+        {
+            if (BaseJson == null || !File.Exists(FilePath)) return null;
+            var disk = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(FilePath)) as System.Text.Json.Nodes.JsonObject;
+            var before = JsonSerializer.Deserialize<Settings>(BaseJson);
+            if (disk == null || before == null) return null;
+            System.Text.Json.Nodes.JsonObject? mine = null;
+            foreach (var p in typeof(Settings).GetProperties().Where(p => p.CanRead && p.CanWrite))
+            {
+                if (!disk.TryGetPropertyValue(p.Name, out var there)) continue;
+                string now = JsonSerializer.Serialize(p.GetValue(this), p.PropertyType, Json);
+                // changed here since: ours stays
+                if (now != JsonSerializer.Serialize(p.GetValue(before), p.PropertyType, Json)) continue;
+                // the file has something else (compared the way it would be written here)
+                if (now == JsonSerializer.Serialize(JsonSerializer.Deserialize(there, p.PropertyType, Json), p.PropertyType, Json)) continue;
+                mine ??= JsonSerializer.SerializeToNode(this, Json)!.AsObject();
+                mine[p.Name] = there?.DeepClone();
+            }
+            return mine?.ToJsonString(Json);
+        }
+        catch { return null; }   // a file being written or not readable: written as it is here, as before
     }
 
     /// <summary>Layers added in later versions fall back to their default.</summary>

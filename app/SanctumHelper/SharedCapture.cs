@@ -59,9 +59,10 @@ public static class SharedCapture
     /// <summary>Set false to never use the shared frame.</summary>
     public static bool Enabled { get; set; } = true;
 
-    /// <summary>The in-game map page is being read: it hardly changes, so Desktop Duplication has few new pictures of it, and one
-    /// over 100 ms old is still that page. (Refused, the page read as closed, and the map came and went, 9 Nov.)</summary>
-    public static volatile bool StillScreen;
+    /// <summary>For a read of the in-game map page (TryGrab's `still`): it hardly changes, so Desktop Duplication has few new
+    /// pictures of it, and one over 100 ms old is still that page. (Refused, the page read as closed, and the map came and went,
+    /// 9 Nov.) It was a shared flag, StillScreen, which let the heading loop's corner reads take pictures that old too while the
+    /// key was held; now only the reads that ask (14 Nov).</summary>
     const long StillAgeMs = 1500;
 
     /// <summary>The aLogs app is running and sharing its capture: then pictures come only from it, and we wait for
@@ -167,9 +168,15 @@ public static class SharedCapture
 
     static void Close()
     {
-        view?.Dispose(); file?.Dispose();
+        // A picture being converted outside the lock (TryGrab) still reads the mapping: it is let go once the last one is done.
+        if (readers > 0) { if (view != null) retired.Add(view); if (file != null) retired.Add(file); }
+        else { view?.Dispose(); file?.Dispose(); }
         view = null; file = null; basePtr = IntPtr.Zero; slot = -1;
     }
+
+    // Pictures being converted outside the lock, and the mappings closed meanwhile (both under `gate`) (14 Nov).
+    static int readers;
+    static readonly System.Collections.Generic.List<IDisposable> retired = new();
 
     static int U16(int at) => (ushort)Marshal.ReadInt16(basePtr, at);
     static uint U32(int at) => (uint)Marshal.ReadInt32(basePtr, at);
@@ -199,6 +206,26 @@ public static class SharedCapture
 
     /// <summary>Asks for the box (shares of the client size, 0-65535) around `area` and the areas used lately;
     /// a new box gets a new request id.</summary>
+    /// <summary>Part of the client (px) as shares of its size (0-65535), as asked for.</summary>
+    static Rect Share(Rect sub, int clientW, int clientH)
+    {
+        int sx0 = (int)((long)sub.X * 65535 / clientW), sy0 = (int)((long)sub.Y * 65535 / clientH);
+        int sx1 = (int)Math.Min(65535, ((long)sub.Right * 65535 + clientW - 1) / clientW);
+        int sy1 = (int)Math.Min(65535, ((long)sub.Bottom * 65535 + clientH - 1) / clientH);
+        return new Rect(sx0, sy0, sx1 - sx0, sy1 - sy0);
+    }
+
+    /// <summary>That part isn't wanted any more: the box asked for shrinks on the next read, instead of 2 s after its last use.
+    /// For the whole window once the in-game map is seen closed: it was copied in 4K ~60 times a second for those 2 s (14 Nov).</summary>
+    public static void Forget(int clientW, int clientH, Rect sub)
+    {
+        if (!Enabled || clientW <= 0 || clientH <= 0) return;
+        sub = sub.Intersect(new Rect(0, 0, clientW, clientH));
+        if (sub.Width <= 0 || sub.Height <= 0) return;
+        var area = Share(sub, clientW, clientH);
+        lock (gate) areas.RemoveAll(a => a.Area == area);
+    }
+
     static void AskArea(Rect area)
     {
         long t = Environment.TickCount64;
@@ -222,40 +249,50 @@ public static class SharedCapture
     /// is no fresh picture of this window at this size holding that part.</summary>
     /// <param name="unlessSame">Dev switch skip-repeat: when the picture is the very one this thread copied this same part from last
     /// time, nothing is copied: null comes back with SameAsLast set. Everything else (the request, every check) runs as always.</param>
-    public static Mat? TryGrab(IntPtr hwnd, int clientW, int clientH, Rect sub, bool unlessSame = false)
+    /// <param name="still">A read of the in-game map page: a picture up to StillAgeMs old will do (see StillAgeMs).</param>
+    public static Mat? TryGrab(IntPtr hwnd, int clientW, int clientH, Rect sub, bool unlessSame = false, bool still = false)
     {
         SameAsLast = false;
         if (!Enabled) return null;
-        lock (gate)
+        long now = 0;
+        IntPtr mapped = IntPtr.Zero;
+        for (int attempt = 0; attempt < 4; attempt++)
         {
-            long t = Environment.TickCount64;
-            // Ask at the pace we're being called: ~60 a second while the overlay key is held, twice a second on the
-            // party screen, nothing otherwise (the request lapses).
-            // (Dev switch facing-30: never asked for faster than 30 a second, whatever else reads in between.)
-            if (lastCall != 0) interval = Math.Clamp(0.7 * interval + 0.3 * (t - lastCall), Dev.Facing30 ? 33 : 16, 1000);
-            lastCall = t;
-            if (!Open()) return null;
-            long now = NowMs;
-            if (!Request(now)) return null;
-            sub = sub.Intersect(new Rect(0, 0, clientW, clientH));
-            if (sub.Width <= 0 || sub.Height <= 0) return null;
-            int sx0 = (int)((long)sub.X * 65535 / clientW), sy0 = (int)((long)sub.Y * 65535 / clientH);
-            int sx1 = (int)Math.Min(65535, ((long)sub.Right * 65535 + clientW - 1) / clientW);
-            int sy1 = (int)Math.Min(65535, ((long)sub.Bottom * 65535 + clientH - 1) / clientH);
-            AskArea(new Rect(sx0, sy0, sx1 - sx0, sy1 - sy0));
-            if (I64(40) != (long)hwnd) return null;
-            int at = PictureBase + slot * Picture;
-            for (int attempt = 0; attempt < 4; attempt++)
+            int at, stride;
+            long seq;
+            uint flags;
+            IntPtr src;
+            lock (gate)
             {
-                long seq = Seq(at + 16);
+                if (attempt == 0)
+                {
+                    long t = Environment.TickCount64;
+                    // Ask at the pace we're being called: ~60 a second while the overlay key is held, twice a second on the
+                    // party screen, nothing otherwise (the request lapses).
+                    // (Dev switch facing-30: never asked for faster than 30 a second, whatever else reads in between.)
+                    if (lastCall != 0) interval = Math.Clamp(0.7 * interval + 0.3 * (t - lastCall), Dev.Facing30 ? 33 : 16, 1000);
+                    lastCall = t;
+                    if (!Open()) return null;
+                    now = NowMs;
+                    if (!Request(now)) return null;
+                    sub = sub.Intersect(new Rect(0, 0, clientW, clientH));
+                    if (sub.Width <= 0 || sub.Height <= 0) return null;
+                    AskArea(Share(sub, clientW, clientH));
+                    if (I64(40) != (long)hwnd) return null;
+                    mapped = basePtr;
+                }
+                else if (basePtr != mapped || slot < 0) return null;   // closed or opened again meanwhile
+                at = PictureBase + slot * Picture;
+                seq = Seq(at + 16);
                 if ((seq & 1) != 0) { Thread.SpinWait(200); continue; }
                 if (U32(at + 12) != request) return null;                  // our area isn't in yet
-                uint flags = U32(at + 48);
+                flags = U32(at + 48);
                 if ((flags & 1) == 0 || U16(at + 56) != clientW || U16(at + 58) != clientH) return null;
                 if (Marshal.ReadByte(basePtr, at + 61) > 1) return null;   // shrunk: not what we asked for
                 // Too old: no picture this time (accepted up to 100 ms, or two of our intervals).
-                if (now - I64(at + 24) > Math.Max(StillScreen ? StillAgeMs : 100, 2 * interval)) return null;
-                int offset = (int)U32(at + 32), stride = (int)U32(at + 36);
+                if (now - I64(at + 24) > Math.Max(still ? StillAgeMs : 100, 2 * interval)) return null;
+                int offset = (int)U32(at + 32);
+                stride = (int)U32(at + 36);
                 var pic = new Rect(U16(at + 40), U16(at + 42), U16(at + 44), U16(at + 46));
                 if (pic.Intersect(sub) != sub) return null;                // a picture of an older, smaller box
                 if (unlessSame && LastPicture == (at, seq) && lastSub == sub)
@@ -268,25 +305,43 @@ public static class SharedCapture
                     SameAsLast = true;
                     return null;
                 }
-                var src = basePtr + Header + offset + (sub.Y - pic.Y) * stride + (sub.X - pic.X) * 4;
-                using var bgra = Mat.FromPixelData(sub.Height, sub.Width, MatType.CV_8UC4, src, stride);
-                var bgr = new Mat();
-                Cv2.CvtColor(bgra, bgr, ColorConversionCodes.BGRA2BGR);
-                if (Seq(at + 16) == seq)
-                {
-                    LastPicture = (at, seq);
-                    lastSub = sub;
-                    LastAgeMs = now - I64(at + 24);
-                    ScreenCopy = (flags & 2) != 0;
-                    CopyMs = U32(at + 52) / 1000.0;
-                    if (!announced) { announced = true; Log.Write("using the aLogs app's shared capture"); }
-                    lastUsed = Environment.TickCount64;
-                    return bgr;
-                }
-                bgr.Dispose();
+                src = basePtr + Header + offset + (sub.Y - pic.Y) * stride + (sub.X - pic.X) * 4;
+                readers++;   // the mapping stays while this converts (Close leaves it to the last reader)
             }
-            return null;
+            // The conversion (~33 MB at 4K) outside the lock: the display thread (CleanNow, our overlay's spot) and the other
+            // reading thread no longer wait for it. The sequence number read again below still throws away a picture written
+            // meanwhile, as before (14 Nov).
+            Mat? bgr = null;
+            bool converted = false;
+            try
+            {
+                using var bgra = Mat.FromPixelData(sub.Height, sub.Width, MatType.CV_8UC4, src, stride);
+                bgr = new Mat();
+                Cv2.CvtColor(bgra, bgr, ColorConversionCodes.BGRA2BGR);
+                converted = true;
+            }
+            finally
+            {
+                lock (gate)
+                {
+                    bool same = Seq(mapped, at + 16) == seq;
+                    if (same && converted)
+                    {
+                        LastPicture = (at, seq);
+                        lastSub = sub;
+                        LastAgeMs = now - I64(mapped, at + 24);
+                        ScreenCopy = (flags & 2) != 0;
+                        CopyMs = U32(mapped, at + 52) / 1000.0;
+                        if (!announced) { announced = true; Log.Write("using the aLogs app's shared capture"); }
+                        lastUsed = Environment.TickCount64;
+                    }
+                    else { bgr?.Dispose(); bgr = null; }
+                    if (--readers == 0 && retired.Count > 0) { foreach (var d in retired) d.Dispose(); retired.Clear(); }
+                }
+            }
+            if (bgr != null) return bgr;
         }
+        return null;
     }
 
     /// <summary>Which picture this thread's last copy came from: the same again means nothing's new (Dev.SkipRepeat).</summary>
@@ -300,11 +355,17 @@ public static class SharedCapture
 
     /// <summary>A sequence number (aligned 8-byte read, so atomic on x64), fenced so the pixel reads stay
     /// between the two checks.</summary>
-    static long Seq(int at)
+    static long Seq(int at) => Seq(basePtr, at);
+
+    /// <summary>The same in a mapping that may have been closed since (it is kept while a reader converts from it).</summary>
+    static long Seq(IntPtr p, int at)
     {
         Interlocked.MemoryBarrier();
-        long seq = Marshal.ReadInt64(basePtr, at);
+        long seq = Marshal.ReadInt64(p, at);
         Interlocked.MemoryBarrier();
         return seq;
     }
+
+    static long I64(IntPtr p, int at) => Marshal.ReadInt64(p, at);
+    static uint U32(IntPtr p, int at) => (uint)Marshal.ReadInt32(p, at);
 }

@@ -16,7 +16,7 @@ namespace SanctumHelper;
 ///  - settings.json is still the one settings file: aLogs edits it and this reloads it live;
 ///  - hosted\info.json (once) lists what the options can be: styles, layers, difficulties,
 ///    languages, layouts;
-///  - hosted\status.json (every second) says what Sanctum Helper sees right now;
+///  - hosted\status.json (on a change, looked at every second, and at least every 3 s) says what Sanctum Helper sees right now;
 ///  - aLogs drops hosted\cmd-*.json files ({ "command": "...", ... }) for actions:
 ///    new-run, position-map, capture-key, capture-pad, clear-pad, render-layout, open-logs.
 /// With --parent &lt;pid&gt; it quits when the aLogs app does.</summary>
@@ -64,7 +64,7 @@ public sealed class Hosted
             // Settings changed on disk (by aLogs): wait for the write to settle, then apply.
             if ((DateTime.UtcNow - settingsChangedAt).TotalMilliseconds > 200) { settingsChangedAt = DateTime.MaxValue; Reload(); }
             RunCommands();
-            if (capturing == "key" && (DateTime.UtcNow - captureStarted).TotalSeconds > 15) capturing = null;
+            if (capturing == "key" && (DateTime.UtcNow - captureStarted).TotalSeconds > 15) { capturing = null; hook.Capturing = false; }
             if (++ticks % 4 == 0) WriteStatus();
         };
         timer.Start();
@@ -145,7 +145,8 @@ public sealed class Hosted
             // the app turns Sanctum Helper off: close the normal way (settings and logs saved), not killed
             case "quit": System.Windows.Application.Current.Dispatcher.BeginInvoke(() => System.Windows.Application.Current.Shutdown()); break;
             case "position-map": app.BeginMiniMapPlacement(); break;
-            case "capture-key": capturing = "key"; captureStarted = DateTime.UtcNow; break;
+            // (the mouse is watched while a key is picked: a mouse button can be one, 14 Nov)
+            case "capture-key": capturing = "key"; captureStarted = DateTime.UtcNow; hook.Capturing = true; break;
             case "capture-pad": CapturePad(); break;
             case "clear-pad": s.HoldButton = 0; s.Save(); break;
             case "open-logs":
@@ -165,11 +166,13 @@ public sealed class Hosted
     {
         if (capturing != "key") return;
         capturing = null;
-        if (vk == 0x1B) return; // Esc cancels
+        // (The mouse hook goes after this callback, not inside it.)
+        if (vk == 0x1B) { app.Dispatcher.BeginInvoke(() => hook.Capturing = false); return; } // Esc cancels
         app.Dispatcher.BeginInvoke(() =>
         {
             s.HoldKey = vk;
             hook.Key = vk;
+            hook.Capturing = false;
             s.Save();
             WriteStatus();
         });
@@ -256,12 +259,27 @@ public sealed class Hosted
         WriteJson("info.json", info);
     }
 
+    string? lastStatus;
+    long lastStatusAt;
+
+    /// <summary>Written when something in it changed, and at least every 3 s so aLogs sees it's alive (it counts status.json
+    /// as fresh for 5 s, sanctum.rs): it was rewritten every second whatever happened (14 Nov).</summary>
     void WriteStatus()
     {
+        string same = JsonSerializer.Serialize(Status(0), Json);
+        long now = Environment.TickCount64;
+        if (same == lastStatus && now - lastStatusAt < 3000) return;
+        lastStatus = same;
+        lastStatusAt = now;
+        WriteJson("status.json", Status(DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()));
+    }
+
+    object Status(long time)
+    {
         var layout = engine.CurrentLayout;
-        var status = new
+        return new
         {
-            time = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+            time,
             pid = Environment.ProcessId,
             devOn = Dev.On(),
             devPersistent = Dev.PersistentOnes(),
@@ -280,7 +298,6 @@ public sealed class Hosted
             sharedCapture = SharedCapture.InUse,
             lastMatch = engine.LastMatchInfo,
         };
-        WriteJson("status.json", status);
     }
 
     static readonly object WriteGate = new();

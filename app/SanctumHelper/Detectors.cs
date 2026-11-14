@@ -62,6 +62,14 @@ public sealed class DifficultyDetector(OcrService ocr)
             .Intersect(new Rect(0, 0, frame.Width, frame.Height));
         if (rc.Width < 20 || rc.Height < 10) return null;
         using var crop = new Mat(frame, rc);
+        return DetectGoal(crop);
+    }
+
+    /// <summary>The goal line's own part of the screen (the region Detect cuts out of a frame), copied on its own: all the
+    /// party screen read ever looked at (14 Nov: a full-width band was copied for it, ~6x the pixels at 4K).</summary>
+    public string? DetectGoal(Mat crop)
+    {
+        if (crop.Width < 20 || crop.Height < 10) return null;
         // Light text on a dark translucent banner: keep only bright pixels so the aurora
         // background behind the banner cannot leak into the OCR.
         using var gray = new Mat();

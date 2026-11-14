@@ -12,10 +12,17 @@ public sealed class KeyHook : IDisposable
     public const int VK_XBUTTON1 = 0x05, VK_XBUTTON2 = 0x06, VK_MBUTTON = 0x04;
 
     readonly Native.LowLevelProc kbProc, msProc;
+    readonly IntPtr module;
     IntPtr kbHook, msHook;
     volatile bool down;
+    int key;
+    bool capturing;
 
-    public int Key { get; set; }
+    /// <summary>The overlay key. The mouse hook is only there while it is a mouse button (or a key is being picked): every
+    /// mouse move of the whole PC went through this process all day for nothing (14 Nov).</summary>
+    public int Key { get => key; set { key = value; UpdateMouseHook(); } }
+    /// <summary>A new key is being picked (a mouse button can be one): the mouse is watched meanwhile. Set on the UI thread.</summary>
+    public bool Capturing { get => capturing; set { capturing = value; UpdateMouseHook(); } }
     public bool IsDown => down;
     /// <summary>Raised on the UI thread's hook callback for any key press; used by the settings
     /// window to capture a new binding.</summary>
@@ -24,14 +31,32 @@ public sealed class KeyHook : IDisposable
 
     public KeyHook(int key)
     {
-        Key = key;
         kbProc = KeyboardProc;
         msProc = MouseProc;
         using var mod = Process.GetCurrentProcess().MainModule;
-        var h = Native.GetModuleHandle(mod?.ModuleName);
-        kbHook = Native.SetWindowsHookEx(Native.WH_KEYBOARD_LL, kbProc, h, 0);
-        msHook = Native.SetWindowsHookEx(Native.WH_MOUSE_LL, msProc, h, 0);
+        module = Native.GetModuleHandle(mod?.ModuleName);
+        kbHook = Native.SetWindowsHookEx(Native.WH_KEYBOARD_LL, kbProc, module, 0);
         if (kbHook == IntPtr.Zero) Log.Write("keyboard hook failed: " + Marshal.GetLastWin32Error());
+        Key = key;   // (installs the mouse hook when it is a mouse button)
+    }
+
+    static bool IsMouse(int vk) => vk is VK_MBUTTON or VK_XBUTTON1 or VK_XBUTTON2;
+
+    /// <summary>The mouse hook on while a mouse button is the key or a key is being picked, off otherwise (on the thread
+    /// that made this hook, which runs the message loop the hooks need).</summary>
+    void UpdateMouseHook()
+    {
+        bool want = IsMouse(key) || capturing;
+        if (want && msHook == IntPtr.Zero)
+        {
+            msHook = Native.SetWindowsHookEx(Native.WH_MOUSE_LL, msProc, module, 0);
+            if (msHook == IntPtr.Zero) Log.Write("mouse hook failed: " + Marshal.GetLastWin32Error());
+        }
+        else if (!want && msHook != IntPtr.Zero)
+        {
+            Native.UnhookWindowsHookEx(msHook);
+            msHook = IntPtr.Zero;
+        }
     }
 
     void Set(bool value)

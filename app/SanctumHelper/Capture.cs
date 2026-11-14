@@ -14,10 +14,17 @@ public sealed class GameWindow
     public Rect Client { get; private set; }
 
     public bool IsValid => Handle != IntPtr.Zero && Native.IsWindow(Handle) && !Native.IsIconic(Handle);
-    public bool IsForeground => Handle != IntPtr.Zero && Native.GetForegroundWindow() == Handle;
+    // (not while minimized: it has no picture then, and nothing should be read or shown, 14 Nov)
+    public bool IsForeground => Handle != IntPtr.Zero && Native.GetForegroundWindow() == Handle && !Native.IsIconic(Handle);
+    /// <summary>The game's window is there but minimized: work pauses as when it isn't in front.</summary>
+    public bool IsMinimized => Handle != IntPtr.Zero && Native.IsIconic(Handle) && Native.IsWindow(Handle);
 
     public bool Refresh(string titleMatch)
     {
+        // Minimized, it is still the game: keep it found at the size it had (a minimized window's client area is 0x0,
+        // which read as "game window lost" and, after a minute, forgot the run, 14 Nov). Its size is read again once restored.
+        if (IsMinimized && Native.WindowText(Handle).Contains(titleMatch, StringComparison.OrdinalIgnoreCase))
+            return Client.Width > 100 && Client.Height > 100;
         if (!IsValid || !Native.WindowText(Handle).Contains(titleMatch, StringComparison.OrdinalIgnoreCase))
             Handle = Find(titleMatch);
         if (Handle == IntPtr.Zero) return false;

@@ -34,6 +34,8 @@ public sealed class OcrService
         if (engine != null) Language = engine.RecognizerLanguage.LanguageTag;
     }
 
+    [ThreadStatic] static byte[]? buffer;
+
     public bool Available => engine != null;
     public string? MissingLanguage { get; }
 
@@ -47,10 +49,14 @@ public sealed class OcrService
         Cv2.Resize(bgr, big, new Size(), f, f, InterpolationFlags.Cubic);
         using var bgra = new Mat();
         Cv2.CvtColor(big, bgra, ColorConversionCodes.BGR2BGRA);
-        var bytes = new byte[bgra.Total() * 4];
-        System.Runtime.InteropServices.Marshal.Copy(bgra.Data, bytes, 0, bytes.Length);
+        // One buffer per thread, kept and grown as needed: each read made a new one of ~0.5 MB at 1080p (a large-object-heap
+        // array, collected only in full collections), twice a second on the party screen (14 Nov).
+        int n = (int)(bgra.Total() * 4);
+        if (buffer == null || buffer.Length < n) buffer = new byte[n];
+        var bytes = buffer;
+        System.Runtime.InteropServices.Marshal.Copy(bgra.Data, bytes, 0, n);
         using var sb = new SoftwareBitmap(BitmapPixelFormat.Bgra8, bgra.Width, bgra.Height, BitmapAlphaMode.Premultiplied);
-        sb.CopyFromBuffer(bytes.AsBuffer());
+        sb.CopyFromBuffer(bytes.AsBuffer(0, n));
         var result = engine.RecognizeAsync(sb).AsTask().GetAwaiter().GetResult();
         return string.Join(" ", result.Lines.Select(l => l.Text));
     }
