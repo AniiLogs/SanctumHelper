@@ -23,7 +23,10 @@ public static class Dev
         ChallengeAsync, SkipRepeat, ArrowRetry, StaleSearch, HostedIo, HanningCache, ResizeSkip, EscNearby, WiderDisc,
         LazyArt, FreeIdle, GrabTime, PictureAge, LogThread,
         HostedScan, CompactMasks, ConeCheck, FloorRooms, BossRooms, DecodeThread, FasterArrow, RetainedMap,
-        ExitSameDoor, ConeLog, RedrawCap, Facing30, Track20, OneWorker, RockLog, Stats, ChestRooms, ChestSearch;
+        ConeLog, RedrawCap, Facing30, Track20, OneWorker, RockLog, Stats, ChestRooms, ChestSearch;
+    // normal behaviour since 0.1.37 B8 (the owner, 14 Nov): out of a Sanctum by the door you went in by, all ten doors looked at
+    // (it was the Dev switch exit-same-door; 11 of 19 exits in players' logs were placed on a weak blue-door match)
+    public static bool ExitSameDoor = true;
 
     const string Bench = "Bench tested", Compared = "Compared with the old pictures", Log = "Checked against a real game log", Untested = "Not tested yet";
 
@@ -124,8 +127,6 @@ public static class Dev
             "First draw of a map's see-through or Radar picture 62-137 to 5-21 ms, of the island 140 to 63 ms.", "The map's picture can appear a moment after its marks. Pictures came out identical once loaded; not tried in a game.", Compared, v => DecodeThread = v),
         new("faster-arrow", LowRisk, "CPU", "Faster arrow read", "Works out how well each turn of the arrow fits directly, around where it last was, instead of through frequency transforms. Wider if unsure, as before.",
             "Arrow reads 1.0 to 0.4 ms while it's being followed; the first read 2.9 to 2.3 ms.", "Same answers on all 4,800 simulated minimaps, but no real ones were recorded to try. An arrow that jumps over 2 px between reads could read a step off once.", Bench, v => FasterArrow = v),
-        new("exit-same-door", LowRisk, "Accuracy", "Out by the door you went in by", "Remembers which island door you went into the Sanctum by (orange or blue; your spawn's orange door if that wasn't seen) and, when you come out, looks at all ten doors, not only the five blue ones: the door you went in by wins a near tie, and a weak match waits about a second for a better one. Going in by a blue door, the Sanctum map starts at its blue door too.",
-            "Every exit in one player's logs (8 of 8) came out of the orange door they went in by and was placed at a blue door of another spawn, so the island map was wrong after each exit.", "Ten doors are looked at on arrival, not one, for up to a second longer. Revision 1: it used to look only at the door you went in by for the first second, and took an exit by another door on a weak match (0.44; real ones measure 0.55 to 0.78).", Log, v => ExitSameDoor = v, 1),
 
         new("grab-time", HighRisk, "Smoothness", "Time movement from when the picture was taken", "Your speed is worked out from when each picture was taken, not when its read finished.",
             "Steadier speed; size unknown.", "Changes how the marker feels.", Untested, v => GrabTime = v),
