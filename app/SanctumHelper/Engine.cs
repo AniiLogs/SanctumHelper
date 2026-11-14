@@ -146,7 +146,11 @@ public sealed class Engine : IDisposable
     volatile bool resetRequested;
     long? gameGoneSince;          // engine clock (ms) when the game window was lost
     bool debugCleared;            // the debug folder was emptied since debug frames were last on
-    bool toggled;
+    volatile bool toggled;        // (set on the hook's thread too)
+    bool toggleModeWas;           // ToggleMode as last seen: a change (e.g. a live reload from aLogs) starts it off (14 Nov)
+    bool padPolled;               // the controller was read on the last tick (a button already held when reading starts isn't a press)
+    volatile bool keyShowing;     // the overlay key shows something now: the heading loop reads the facing for it (14 Nov)
+    long headingReads;            // facing reads done (Interlocked), so a key press can wait for a fresh one
 
     public event Action<OverlayFrame>? Frame;
 
@@ -206,7 +210,9 @@ public sealed class Engine : IDisposable
         doors = new DoorLocator(arts, Cv2.ImRead(System.IO.Path.Combine(icons, "map_header.png")),
             Cv2.ImRead(System.IO.Path.Combine(icons, "screen_door_orange.png")), Cv2.ImRead(System.IO.Path.Combine(icons, "screen_door_blue.png")));
         minimap = new MinimapTracker(arts) { Main = true };
-        hook.StateChanged += down => { if (down && settings.ToggleMode) toggled = !toggled; };
+        // Toggle mode: only a press with the game in front and in Egg Heist flips it, where the overlay can show. A press in
+        // another window or out in the world flipped it unseen, so the map popped up later on its own (14 Nov).
+        hook.StateChanged += down => { if (down && settings.ToggleMode && game.IsForeground && InEggHeist) toggled = !toggled; };
         if (!ocr.Available) Log.Write("Windows OCR is not available: difficulty must be set by hand");
         // The game's log says where the player is (island, Sanctum, elsewhere) and when a run
         // starts; read what it already holds so a run in progress is known from the start.
@@ -311,6 +317,7 @@ public sealed class Engine : IDisposable
                 if (resetRequested)
                 {
                     resetRequested = false;
+                    toggled = false;   // a new run starts with the overlay off in toggle mode (14 Nov)
                     CurrentLayout = null; lastPose = null; player = null; minimap.Reset(); ChestSets.Reset();
                     if (Dev.OldPanFix) { prevGray?.Dispose(); prevGray = null; prevGrayPose = null; }
                     onIsland = false; islandPlayer = null; islandPose = null; islandTracker.Reset(); islandTracker.Release();
@@ -334,15 +341,21 @@ public sealed class Engine : IDisposable
                         });
                 }
                 hook.Poll();
+                if (settings.ToggleMode != toggleModeWas) { toggleModeWas = settings.ToggleMode; toggled = false; }
                 // The controller button works like the overlay key (held, or pressed to toggle).
+                // Read only with the game in front and in Egg Heist, the only time it can show anything: the pads were read
+                // ~60 times a second all day (14 Nov). (Picking a new button reads the pad on its own, in the settings.)
+                // A button already held when reading starts isn't a press, as before when it was read all along.
                 bool padDown = false;
-                if (settings.HoldButton != 0)
+                bool padLive = settings.HoldButton != 0 && game.IsForeground && InEggHeist;
+                if (padLive)
                 {
                     pad.Poll();
                     padDown = pad.IsDown(settings.HoldButton);
-                    if (padDown && !padWasDown && settings.ToggleMode) toggled = !toggled;
+                    if (padDown && !padWasDown && padPolled && settings.ToggleMode) toggled = !toggled;
                 }
                 padWasDown = padDown;
+                padPolled = padLive;
                 // The game's language can be changed in game: follow it when set to Auto.
                 if (now >= nextLangCheck)
                 {
@@ -408,9 +421,13 @@ public sealed class Engine : IDisposable
                 if (!GameFound)
                 {
                     if (wasShowing) { Emit(new OverlayFrame(default, false, null, null, null, false, null, "")); wasShowing = false; }
+                    toggled = false;   // the game went away: toggle mode starts off when it's back (14 Nov)
                     // The game closed for a minute: the run is over, let its maps go (they stayed loaded, 300-500 MB,
                     // until Sanctum Helper itself closed). Only the in-game checks below did this before.
-                    gameGoneSince ??= now;
+                    // A minimized game isn't closed (14 Nov: one minimized for a minute lost its run's layout). (Only one
+                    // found minimized before its size was ever known ends up here; one known stays found, see below.)
+                    if (game.IsMinimized) gameGoneSince = null;
+                    else gameGoneSince ??= now;
                     if (now - gameGoneSince > 60_000 && (CurrentLayout != null || arts.Loaded > 0) && !resetRequested)
                     {
                         Log.Write("game closed for a minute: forgetting the run and its maps");
@@ -421,8 +438,24 @@ public sealed class Engine : IDisposable
                 }
 
                 gameGoneSince = null;
-                bool show = (settings.ToggleMode ? toggled : hook.IsDown || padDown) && game.IsForeground;
-                if (show && !wasShowing) { miniShowing = false; heldSince = now; Log.Write($"overlay key down ({(padDown ? "controller " + Gamepad.Name(settings.HoldButton) : KeyHook.Name(hook.Key))})"); }
+                // Left Egg Heist: toggle mode starts off next time, instead of the map popping up on entering a later run (14 Nov).
+                if (!InEggHeist) toggled = false;
+                // Only in Egg Heist, where something can show (Emit hides every frame outside it): out in the world or a
+                // homeland the overlay key (Left Ctrl by default, or a toggle left on) grabbed the map screen's title
+                // corner ~60 times a second, and a whole 4K window each tick with the world map open, for nothing (14 Nov).
+                bool show = (settings.ToggleMode ? toggled : hook.IsDown || padDown) && game.IsForeground && InEggHeist;
+                keyShowing = show;
+                if (show && !wasShowing)
+                {
+                    miniShowing = false; heldSince = now; Log.Write($"overlay key down ({(padDown ? "controller " + Gamepad.Name(settings.HoldButton) : KeyHook.Name(hook.Key))})");
+                    // With no on-screen map the facing isn't read until the key shows something (see UpdateHeading): wait for
+                    // two fresh reads (an egg takes two to tell), ~35 ms, so the first frame has the arrow it always had (14 Nov).
+                    if (headingPaused && InRun)
+                    {
+                        long want = Interlocked.Read(ref headingReads) + 2;
+                        for (int i = 0; i < 25 && Interlocked.Read(ref headingReads) < want; i++) Thread.Sleep(2);
+                    }
+                }
                 if (show)
                 {
                     // The in-game map open: one window capture for the full-map overlay. Closed: the
@@ -435,18 +468,21 @@ public sealed class Engine : IDisposable
                     // world, hub, layout unknown), a whole window was copied ~60 times a second only to find that.
                     // (Open on the last tick: straight to the whole copy, whose map check runs again.)
                     bool mapOpen = !bigOk && doors.LastMapOpen;
-                    SharedCapture.StillScreen = true;
+                    var whole = new Rect(0, 0, c0.Width, c0.Height);
                     if (!mapOpen)
-                        using (var head = Grab(MapTitleRect(c0)))
+                        using (var head = Grab(MapTitleRect(c0), still: true))
                         {
                             // no picture yet is not "the map is closed": look again next tick, what's up stays up
                             if (noPicture) { wasShowing = true; Thread.Sleep(10); continue; }
                             mapOpen = MapScreenOpen(head, c0);
+                            // Seen closed: the whole window is no longer asked of the aLogs app. It stayed asked for 2 s after
+                            // every map close, ~60 whole 4K copies a second for nothing (14 Nov).
+                            if (!mapOpen) SharedCapture.Forget(c0.Width, c0.Height, whole);
                         }
                     if (mapOpen)
                     {
                         long tMap = Tally.Start;
-                        using var frame = Grab(new Rect(0, 0, c0.Width, c0.Height));
+                        using var frame = Grab(whole, still: true);
                         if (noPicture) { wasShowing = true; Thread.Sleep(10); continue; }
                         minimap.HoldStill();
                         ShowMap(frame);
@@ -467,11 +503,12 @@ public sealed class Engine : IDisposable
                     Thread.Sleep(Math.Max(1, left));
                     continue;
                 }
-                SharedCapture.StillScreen = false;
                 if (wasShowing)
                 {
                     Emit(new OverlayFrame(game.Client, false, CurrentLayout, null, null, false, EffectiveDifficulty, ""));
                     wasShowing = false;
+                    // The key let go: nothing reads the whole window now (14 Nov, as when the map is seen closed above).
+                    SharedCapture.Forget(game.Client.Width, game.Client.Height, new Rect(0, 0, game.Client.Width, game.Client.Height));
                 }
                 // The party screen is read even with another window in front (e.g. this app's
                 // settings, to see the difficulty come in); window capture doesn't need focus.
@@ -482,7 +519,8 @@ public sealed class Engine : IDisposable
                 // lagged in a homeland with aLogs running) left Auto with no difficulty (0.1.31 report; a player read
                 // 3 s before leaving home on 28 Oct, then nothing). It's the only read there, at the same pace: the
                 // party screen can be up for a few seconds only, and the goal line's band is all that's copied.
-                if (now >= nextOcr && settings.Difficulty == "Auto" && ocr.Available && !inRunNow)
+                // (Not while the game is minimized: it has no picture then, 14 Nov.)
+                if (now >= nextOcr && settings.Difficulty == "Auto" && ocr.Available && !inRunNow && !game.IsMinimized)
                 {
                     // Each read copies the game window (PrintWindow draws all of it): with the game behind another
                     // window, every 1.5 s is enough to catch the party screen (was every 0.5 s whatever was in front).
@@ -531,7 +569,10 @@ public sealed class Engine : IDisposable
                 if (Dev.ChestRooms && Dev.ChestSearch && now >= nextPrompt) { nextPrompt = now + 600; ReadChestPrompt(); }
                 // Sleep until the next fix is due, or (while fast) until a new corner copy lands.
                 long t = sw.ElapsedMilliseconds, due = t < nextMinimap ? nextMinimap : nextMinimap + 40;
-                if (fast && settings.TrackMinimap) cornerReady.WaitOne((int)Math.Clamp(due - t, 1, 15));
+                // Out of Egg Heist (the game log says so) nothing here is shown or tracked: 100 ms between ticks instead of 15.
+                // What runs there keeps its own pace within that (game log every 250 ms, the party screen every 0.5-1 s) (14 Nov).
+                if (!InEggHeist) Thread.Sleep(100);
+                else if (fast && settings.TrackMinimap) cornerReady.WaitOne((int)Math.Clamp(due - t, 1, 15));
                 else Thread.Sleep(15);
             }
             catch (Exception e)
@@ -594,12 +635,18 @@ public sealed class Engine : IDisposable
                 lock (cornerGate) { sharedCorner?.Dispose(); sharedCorner = top; sharedCornerAt = grabbed; sharedCornerSeq++; }
                 headingPicture = picture;   // (only once its copy is the one held: skip-repeat goes by this)
                 cornerReady.Set();   // the tracking loop picks it up right away instead of on its next tick
-                using (var mm = new Mat(top!, InCorner(rc, corner)))
-                {
-                    var t2 = perfClock.ElapsedTicks;
-                    UpdateHeading(mm, ui);
-                    perfHeading.Add(perfClock.ElapsedTicks - t2);
-                }
+                // The facing (arrow, cone, egg) is drawn only on our maps: read it while the on-screen map is on (Off: nothing
+                // draws it) or the overlay key shows something. The corner copy above is still made, for tracking (14 Nov).
+                bool facingWanted = settings.MiniMapMode != "Off" || miniShowing || keyShowing;
+                headingPaused = !facingWanted;
+                if (facingWanted)
+                    using (var mm = new Mat(top!, InCorner(rc, corner)))
+                    {
+                        var t2 = perfClock.ElapsedTicks;
+                        UpdateHeading(mm, ui);
+                        perfHeading.Add(perfClock.ElapsedTicks - t2);
+                        Interlocked.Increment(ref headingReads);
+                    }
             }
             catch (Exception e) { Log.Write("heading: " + e.Message); Thread.Sleep(500); }
             // a corner read without our map over it (Magnifier) costs about a screen copy: at most 25 a second
@@ -609,6 +656,7 @@ public sealed class Engine : IDisposable
     }
 
     (int at, long seq) headingPicture;
+    volatile bool headingPaused;   // the last corner copy's facing wasn't read (nothing draws it now)
     bool HasSharedCorner(Size like) { lock (cornerGate) return sharedCorner != null && sharedCorner.Size() == like; }
 
     readonly object cornerGate = new();
@@ -671,7 +719,10 @@ public sealed class Engine : IDisposable
         // facing when the arrow is gone (smoothed more: a soft wedge is noisier than the arrow).
         // 0.2: on a recorded camera spin, good readings scored 0.22-0.30 when the cone lay over walls;
         // a 0.3 cut-off dropped ~40% of them and the cone froze, then leapt (31 big swings -> 2).
-        var coneRead = HeadingDetector.FromViewCone(mm, ui, out double coneConf);
+        // Read only when it's drawn (View cone on) or the arrow is missing: then it becomes the facing after 0.6 s without
+        // the arrow, and it's read from the first miss, so its smoothing has run that long when it takes over (14 Nov).
+        double coneConf = 0;
+        double? coneRead = settings.ShowViewCone || h == null || Dev.ConeLog ? HeadingDetector.FromViewCone(mm, ui, out coneConf) : null;
         if (Dev.ConeLog) ConeNote(coneRead, coneConf, now, h != null);
         if (coneRead is double ch && coneConf >= 0.2)
         {
@@ -868,7 +919,9 @@ public sealed class Engine : IDisposable
     long lastMapPageLook = -10000;
     bool noPicture;     // the last Grab had no picture from the app yet: what it gave is empty, and says nothing about the screen
 
-    Mat Grab(Rect sub)
+    /// <param name="still">The in-game map page is read (see SharedCapture.TryGrab): was the shared StillScreen, which also let the
+    /// heading loop's corner reads take pictures up to 1.5 s old while the key was held (14 Nov).</param>
+    Mat Grab(Rect sub, bool still = false)
     {
         var c = game.Client;
         // With the aLogs app running, whole frames come only from its shared capture (it copies the screen itself
@@ -876,7 +929,7 @@ public sealed class Engine : IDisposable
         // which nothing matches, until the next one.
         if (SharedCapture.AppPresent)
         {
-            var shared = SharedCapture.TryGrab(game.Handle, c.Width, c.Height, sub);
+            var shared = SharedCapture.TryGrab(game.Handle, c.Width, c.Height, sub, still: still);
             noPicture = shared == null;
             OwnOverlays.Tick();
             if (shared != null && SharedCapture.ScreenCopy)
@@ -967,9 +1020,11 @@ public sealed class Engine : IDisposable
     {
         var c = game.Client;
         var rc = Regions.ToClient(settings.PartyGoalRegion, Anchor.TopCenter, c.Width, c.Height);
-        // Grab only a band around the goal line; cheap enough to do every 1.5 s.
-        using var band = Grab(new Rect(0, 0, c.Width, Math.Min(c.Height, rc.Bottom + 10)));
-        var d = difficulty.Detect(band, settings.PartyGoalRegion, c.Width, c.Height);
+        // Grab only the goal line's own part (the same pixels the reader cut out of a full-width band, which was copied whole
+        // every read, 14 Nov); cheap enough to do every 1.5 s.
+        if (rc.Width < 20 || rc.Height < 10) return false;
+        using var goal = Grab(rc);
+        var d = difficulty.DetectGoal(goal);
         if (d == null) return false;
         // Being on the party screen means any previous run is over.
         if (CurrentLayout != null && settings.ForcedLayout == 0) ResetRun();
@@ -1032,7 +1087,9 @@ public sealed class Engine : IDisposable
         // 27 ms for a whole-window capture; no overlay ever draws over the HUD corner).
         var grabbedAt = DateTime.UtcNow;     // when the picture was taken (the heading loop's copy: a few ms ago)
         using var top = fullFrame != null ? new Mat(fullFrame, corner).Clone()
-            : TakeSharedCorner(corner, ref grabbedAt) ?? (SharedCapture.AppPresent ? Grab(corner) : ScreenPart(corner));
+            // (While the key shows something this copy may be up to 1.5 s old, as it could under the old shared StillScreen: a
+            // stalled corner then still gives the last picture, not an empty one read as the run timer gone, 14 Nov.)
+            : TakeSharedCorner(corner, ref grabbedAt) ?? (SharedCapture.AppPresent ? Grab(corner, still: keyShowing) : ScreenPart(corner));
         // Counts of "N readings in a row" below were tuned at ~20 ticks a second: they only advance
         // on ticks at least 45 ms apart, so they still span the same time at today's faster ticks.
         bool slowTick = clock.ElapsedMilliseconds - lastSlowTick >= 45;
@@ -1054,12 +1111,13 @@ public sealed class Engine : IDisposable
             else if ((DateTime.UtcNow - hudLastSeen).TotalSeconds > 0.5) hudVisible = false;
         }
         // No run timer: maybe the map screen (M, or Select on a controller). Looked at four times a second, only while the timer's gone
-        if (!lastTimerSeen && clock.ElapsedMilliseconds - lastMapPageLook >= 250)
+        // Only while the minimap has a fix to hold (HoldStill does nothing without one): out in the world there's none, and
+        // the title corner was copied and read four times a second for nothing (14 Nov). Not after the InRun check below: the
+        // map page hides the run timer, so a map left open over 15 s ends InRun and its fix must still be held.
+        if (!lastTimerSeen && minimap.LastPosition != null && clock.ElapsedMilliseconds - lastMapPageLook >= 250)
         {
             lastMapPageLook = clock.ElapsedMilliseconds;
-            SharedCapture.StillScreen = true;
-            using var head = Grab(MapTitleRect(c));
-            SharedCapture.StillScreen = false;
+            using var head = Grab(MapTitleRect(c), still: true);
             if (!noPicture && MapScreenOpen(head, c)) minimap.HoldStill();
         }
         if (!InRun) { if (Dev.MisfitFix) misfitSince = null; return; }

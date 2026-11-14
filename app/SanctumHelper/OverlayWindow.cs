@@ -78,6 +78,7 @@ public sealed class OverlayWindow : Window
             // shows up or moves meanwhile.
             if (f.Visible && f.Client.Width > 0 && f.Client != view.PlacementClient) Cover(f.Client);
             view.Frame = f;
+            hiddenDrawn = false;
             view.InvalidateVisual();
             return;
         }
@@ -132,6 +133,10 @@ public sealed class OverlayWindow : Window
         bool sameLook = (Dev.RedrawSkip || (Dev.RetainedMap && view.RetainedLive)) && before != null && f is { Mini: true, Visible: true, Player: not null } && before.Player != null && egg == lastEgg && nowMs - lastRedraw < 250
             && before with { Player = f.Player, PlayerFresh = f.PlayerFresh, Heading = f.Heading, Velocity = f.Velocity, Stamp = f.Stamp, Camera = f.Camera } == f;
         lastEgg = egg;
+        // Hidden now and already drawn hidden (an empty window): nothing to redraw. Hidden frames come ~60 a second while the
+        // key is held with nothing to show yet (the first 0.7 s, no fix), each redrawn into nothing (14 Nov). (Placement clears it.)
+        if (!f.Visible && hiddenDrawn) sameLook = true;
+        hiddenDrawn = !f.Visible;
         Tally.Add(sameLook ? Tally.N.FrameNoDraw : Tally.N.Frame);
         if (sameLook) return;
         lastRedraw = nowMs;
@@ -139,6 +144,7 @@ public sealed class OverlayWindow : Window
     }
     long lastRedraw;
     bool lastEgg;
+    bool hiddenDrawn;   // the last redraw asked for was of a hidden frame (nothing drawn), and nothing else drew since
 
     // ---- Placement mode: the user drags the on-screen map where they want it. The overlay is
     // normally click-through (WS_EX_TRANSPARENT); while placing it takes the mouse, but only
@@ -205,6 +211,7 @@ public sealed class OverlayWindow : Window
         SetClickThrough(true);
         // Back to wherever the engine wants the overlay (the next frame moves it if needed).
         placed = default;
+        hiddenDrawn = false;   // the placement picture is up: the next frame redraws, hidden or not
         if (live != null) Apply(live); else { view.Frame = null; view.InvalidateVisual(); }
         PlacementEnded?.Invoke();
         Log.Write($"mini map placement {(keep ? "saved" : "cancelled")}: {(settings.MiniMapX is double x ? $"{x:0.000},{settings.MiniMapY:0.000}" : "default")} size {settings.MiniMapSize:0}");
