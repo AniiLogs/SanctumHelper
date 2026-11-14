@@ -418,8 +418,9 @@ public sealed class OverlayView : FrameworkElement
         }
         if (e is RenderingEventArgs re) { if (re.RenderingTime == lastRenderTime) return; lastRenderTime = re.RenderingTime; }
         var now = DateTime.UtcNow;
-        // Dev switch redraw-cap: on a 120 Hz or faster screen, every other frame is left as it is (at most ~60-80 steps a second).
-        if (Dev.RedrawCap && (now - lastTick).TotalMilliseconds < 12) { Tally.Add(Tally.N.TickCapped); return; }
+        // RedrawCap (aLogs › Performance, was the Dev switch redraw-cap): on a 120 Hz or faster screen, frames closer than
+        // 12 ms to the last step are left as they are (at most about 80 steps a second)
+        if (settings.RedrawCap && (now - lastTick).TotalMilliseconds < 12) { Tally.Add(Tally.N.TickCapped); return; }
         double dt = Math.Min(0.1, (now - lastTick).TotalSeconds);
         lastTick = now;
         if (Frame is not { Mini: true, Visible: true, Player: OpenCvSharp.Point2d fix } fr) { shown = null; shownHeading = shownCamera = null; return; }
