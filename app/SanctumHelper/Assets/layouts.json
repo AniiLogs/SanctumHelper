@@ -1,5 +1,5 @@
 {
- "gameDataVersion": "3846247",
+ "gameDataVersion": "4047363",
  "mode": 3005,
  "difficulties": [
   "Normal",
@@ -26,9 +26,7 @@
    20050
   ],
   "Nightmare": [
-   20031,
    20032,
-   20033,
    20034,
    20035,
    20037,
@@ -45,9 +43,7 @@
    20062
   ],
   "Chaos": [
-   20031,
    20032,
-   20033,
    20034,
    20035,
    20037,
@@ -117,15 +113,14 @@
    ]
   }
  },
- "missingArt": [],
+ "missingArt": [
+  20063
+ ],
  "layouts": [
   {
    "scene": 20031,
    "layout": 31,
-   "difficulties": [
-    "Nightmare",
-    "Chaos"
-   ],
+   "difficulties": [],
    "image": "maps/20031.png",
    "layers": [
     "maps/20031_1_2_0.png"
@@ -978,28 +973,11 @@
     },
     {
      "id": 47,
-     "type": 5,
-     "kind": "room",
-     "depth": 6,
-     "prefab": "Level_Room_10_011",
+     "type": 2,
+     "kind": "corridor",
+     "depth": 5,
+     "prefab": "Level_Room_10_009",
      "yaw": 0,
-     "world": [
-      195,
-      -159
-     ],
-     "img": [
-      276.8,
-      443.4
-     ],
-     "links": 1
-    },
-    {
-     "id": 48,
-     "type": 5,
-     "kind": "room",
-     "depth": 6,
-     "prefab": "Level_Room_10_012",
-     "yaw": 90,
      "world": [
       215,
       -139
@@ -1011,12 +989,29 @@
      "links": 1
     },
     {
+     "id": 48,
+     "type": 2,
+     "kind": "corridor",
+     "depth": 5,
+     "prefab": "Level_Room_10_009",
+     "yaw": 90,
+     "world": [
+      195,
+      -159
+     ],
+     "img": [
+      276.8,
+      443.4
+     ],
+     "links": 1
+    },
+    {
      "id": 49,
-     "type": 1,
-     "kind": "room",
-     "depth": 6,
-     "prefab": "Level_Room_10_008",
-     "yaw": 180,
+     "type": 2,
+     "kind": "corridor",
+     "depth": 5,
+     "prefab": "Level_Room_10_009",
+     "yaw": 90,
      "world": [
       235,
       -159
@@ -1970,12 +1965,12 @@
      "name": "Simple Iron Chest",
      "room": 3,
      "world": [
-      340.04,
-      -214.21
+      334.04,
+      -239.21
      ],
      "img": [
-      1165.1,
-      781.4
+      1128.3,
+      934.4
      ],
      "group": "机关T1"
     },
@@ -4582,62 +4577,6 @@
       548.6
      ],
      "group": "奖励G2"
-    },
-    {
-     "kind": "luxurious",
-     "name": "Luxurious Ruin Chest",
-     "room": 49,
-     "world": [
-      233.6,
-      -155.56
-     ],
-     "img": [
-      513.2,
-      422.4
-     ],
-     "group": "金色钥匙门"
-    },
-    {
-     "kind": "exquisite",
-     "name": "Exquisite Relic Chest",
-     "room": 49,
-     "world": [
-      235.13,
-      -158.22
-     ],
-     "img": [
-      522.6,
-      438.6
-     ],
-     "group": "金色钥匙门"
-    },
-    {
-     "kind": "luxurious",
-     "name": "Luxurious Ruin Chest",
-     "room": 49,
-     "world": [
-      238.47,
-      -157.34
-     ],
-     "img": [
-      543.0,
-      433.3
-     ],
-     "group": "金色钥匙门"
-    },
-    {
-     "kind": "luxurious",
-     "name": "Luxurious Ruin Chest",
-     "room": 49,
-     "world": [
-      233.39,
-      -162.47
-     ],
-     "img": [
-      511.9,
-      464.7
-     ],
-     "group": "金色钥匙门"
     },
     {
      "kind": "simple",
@@ -9924,10 +9863,7 @@
   {
    "scene": 20033,
    "layout": 33,
-   "difficulties": [
-    "Nightmare",
-    "Chaos"
-   ],
+   "difficulties": [],
    "image": "maps/20033.png",
    "layers": [
     "maps/20033_1_2_0.png"
@@ -10538,7 +10474,7 @@
       512.9,
       1258.7
      ],
-     "links": 3
+     "links": 2
     },
     {
      "id": 33,
@@ -10726,23 +10662,6 @@
       757.3
      ],
      "links": 2
-    },
-    {
-     "id": 44,
-     "type": 1,
-     "kind": "room",
-     "depth": 1,
-     "prefab": "Level_Room_10_008",
-     "yaw": 0,
-     "world": [
-      81,
-      -315
-     ],
-     "img": [
-      429.5,
-      1264.3
-     ],
-     "links": 1
     },
     {
      "id": 45,
@@ -12651,12 +12570,12 @@
      "name": "Simple Iron Chest",
      "room": 7,
      "world": [
-      179.79,
-      -230.04
+      154.79,
+      -224.04
      ],
      "img": [
-      978.5,
-      790.9
+      839.6,
+      757.5
      ],
      "group": "机关T1"
     },
@@ -13001,12 +12920,12 @@
      "name": "Simple Iron Chest",
      "room": 8,
      "world": [
-      281.79,
-      -216.04
+      256.79,
+      -210.04
      ],
      "img": [
-      1545.3,
-      712.9
+      1406.4,
+      679.5
      ],
      "group": "机关T1"
     },
@@ -15053,62 +14972,6 @@
       777.3
      ],
      "group": "奖励G3"
-    },
-    {
-     "kind": "luxurious",
-     "name": "Luxurious Ruin Chest",
-     "room": 44,
-     "world": [
-      82.4,
-      -318.44
-     ],
-     "img": [
-      437.3,
-      1283.5
-     ],
-     "group": "金色钥匙门"
-    },
-    {
-     "kind": "exquisite",
-     "name": "Exquisite Relic Chest",
-     "room": 44,
-     "world": [
-      80.87,
-      -315.78
-     ],
-     "img": [
-      428.8,
-      1268.6
-     ],
-     "group": "金色钥匙门"
-    },
-    {
-     "kind": "luxurious",
-     "name": "Luxurious Ruin Chest",
-     "room": 44,
-     "world": [
-      77.53,
-      -316.66
-     ],
-     "img": [
-      410.3,
-      1273.5
-     ],
-     "group": "金色钥匙门"
-    },
-    {
-     "kind": "luxurious",
-     "name": "Luxurious Ruin Chest",
-     "room": 44,
-     "world": [
-      82.61,
-      -311.53
-     ],
-     "img": [
-      438.5,
-      1245.0
-     ],
-     "group": "金色钥匙门"
     },
     {
      "kind": "simple",
@@ -25842,12 +25705,12 @@
      "name": "Simple Iron Chest",
      "room": 58,
      "world": [
-      265.96,
-      -203.79
+      271.96,
+      -178.79
      ],
      "img": [
-      1107.8,
-      883.9
+      1142.1,
+      740.1
      ],
      "group": "机关T1"
     },
@@ -28162,6 +28025,20 @@
      "group": "奖励G6"
     },
     {
+     "kind": "nest",
+     "name": "Egg Nest - Egg Drop",
+     "room": 4,
+     "world": [
+      396.83,
+      -235.73
+     ],
+     "img": [
+      1758.9,
+      573.9
+     ],
+     "group": "蛋巢（噩梦）"
+    },
+    {
      "kind": "luxurious",
      "name": "Luxurious Ruin Chest",
      "room": 21,
@@ -28446,12 +28323,12 @@
      "name": "Simple Iron Chest",
      "room": 21,
      "world": [
-      263.79,
-      -252.04
+      238.79,
+      -246.04
      ],
      "img": [
-      868.7,
-      683.6
+      701.4,
+      643.2
      ],
      "group": "机关T1"
     },
@@ -33031,6 +32908,20 @@
       1227.5
      ],
      "group": "奖励G6"
+    },
+    {
+     "kind": "nest",
+     "name": "Egg Nest - Egg Drop",
+     "room": 24,
+     "world": [
+      320.27,
+      -292.83
+     ],
+     "img": [
+      1699.8,
+      1227.1
+     ],
+     "group": "蛋巢（噩梦）"
     },
     {
      "kind": "luxurious",
@@ -59610,12 +59501,12 @@
      "name": "Simple Iron Chest",
      "room": 18,
      "world": [
-      263.79,
-      -234.04
+      238.79,
+      -228.04
      ],
      "img": [
-      586.6,
-      1283.2
+      346.0,
+      1225.5
      ],
      "group": "机关T1"
     },
@@ -63549,12 +63440,12 @@
      "name": "Simple Iron Chest",
      "room": 4,
      "world": [
-      379.79,
-      -194.04
+      354.79,
+      -188.04
      ],
      "img": [
-      1228.6,
-      605.5
+      1044.5,
+      561.4
      ],
      "group": "机关T1"
     },
@@ -71110,12 +71001,12 @@
      "name": "Simple Iron Chest",
      "room": 42,
      "world": [
-      374.21,
-      -351.96
+      399.21,
+      -357.96
      ],
      "img": [
-      1452.3,
-      909.9
+      1645.7,
+      956.5
      ],
      "group": "机关T1"
     },
@@ -72728,12 +72619,12 @@
      "name": "Simple Iron Chest",
      "room": 18,
      "world": [
-      263.79,
-      -234.04
+      238.79,
+      -228.04
      ],
      "img": [
-      566.0,
-      1268.3
+      337.6,
+      1213.3
      ],
      "group": "机关T1"
     },
@@ -109381,12 +109272,12 @@
      "name": "Simple Iron Chest",
      "room": 3,
      "world": [
-      365.79,
-      -168.04
+      340.79,
+      -162.04
      ],
      "img": [
-      1587.7,
-      492.5
+      1435.8,
+      456.3
      ],
      "group": "机关T1"
     },
@@ -116940,12 +116831,12 @@
      "name": "Simple Iron Chest",
      "room": 51,
      "world": [
-      139.96,
-      -111.79
+      145.96,
+      -86.79
      ],
      "img": [
-      351.8,
-      901.7
+      386.6,
+      756.6
      ],
      "group": "机关T1"
     },
